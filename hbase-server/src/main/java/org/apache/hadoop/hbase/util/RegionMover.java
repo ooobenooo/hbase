@@ -31,11 +31,14 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.EnumSet;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
@@ -60,12 +63,15 @@ import org.apache.hadoop.hbase.client.ResultScanner;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.filter.FirstKeyOnlyFilter;
+import org.apache.hadoop.hbase.net.Address;
+import org.apache.hadoop.hbase.rsgroup.RSGroupInfo;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
 import org.apache.hbase.thirdparty.org.apache.commons.cli.CommandLine;
+import org.apache.hbase.thirdparty.org.apache.commons.collections4.CollectionUtils;
 
 /**
  * Tool for loading/unloading regions to/from given regionserver This tool can be run from Command
@@ -78,13 +84,15 @@ import org.apache.hbase.thirdparty.org.apache.commons.cli.CommandLine;
  */
 @InterfaceAudience.Public
 public class RegionMover extends AbstractHBaseTool implements Closeable {
-  public static final String MOVE_RETRIES_MAX_KEY = "hbase.move.retries.max";
-  public static final String MOVE_WAIT_MAX_KEY = "hbase.move.wait.max";
-  public static final String SERVERSTART_WAIT_MAX_KEY = "hbase.serverstart.wait.max";
-  public static final int DEFAULT_MOVE_RETRIES_MAX = 5;
-  public static final int DEFAULT_MOVE_WAIT_MAX = 60;
-  public static final int DEFAULT_SERVERSTART_WAIT_MAX = 180;
-  static final Logger LOG = LoggerFactory.getLogger(RegionMover.class);
+  private static final String MOVE_RETRIES_MAX_KEY = "hbase.move.retries.max";
+  private static final String MOVE_WAIT_MAX_KEY = "hbase.move.wait.max";
+  static final String SERVERSTART_WAIT_MAX_KEY = "hbase.serverstart.wait.max";
+  private static final int DEFAULT_MOVE_RETRIES_MAX = 5;
+  private static final int DEFAULT_MOVE_WAIT_MAX = 60;
+  private static final int DEFAULT_SERVERSTART_WAIT_MAX = 180;
+
+  private static final Logger LOG = LoggerFactory.getLogger(RegionMover.class);
+
   private RegionMoverBuilder rmbuilder;
   private boolean ack = true;
   private int maxthreads = 1;
@@ -416,17 +424,34 @@ public class RegionMover extends AbstractHBaseTool implements Closeable {
       try {
         // Get Online RegionServers
         List<ServerName> regionServers = new ArrayList<>();
-        regionServers.addAll(
-            admin.getClusterMetrics(EnumSet.of(Option.LIVE_SERVERS)).getLiveServerMetrics()
-                .keySet());
+        RSGroupInfo rsgroup = admin.getRSGroup(Address.fromParts(hostname, port));
+        LOG.info("{} belongs to {}", hostname, rsgroup.getName());
+        regionServers.addAll(filterRSGroupServers(rsgroup, admin.getRegionServers()));
         // Remove the host Region server from target Region Servers list
         ServerName server = stripServer(regionServers, hostname, port);
+        if (server == null) {
+          LOG.info("Could not find server '{}:{}' in the set of region servers. giving up.",
+              hostname, port);
+          LOG.debug("List of region servers: {}", regionServers);
+          return false;
+        }
         // Remove RS present in the exclude file
         stripExcludes(regionServers);
+
+        // Remove decommissioned RS
+        Set<ServerName> decommissionedRS = new HashSet<>(admin.listDecommissionedRegionServers());
+        if (CollectionUtils.isNotEmpty(decommissionedRS)) {
+          regionServers.removeIf(decommissionedRS::contains);
+          LOG.debug("Excluded RegionServers from unloading regions to because they " +
+            "are marked as decommissioned. Servers: {}", decommissionedRS);
+        }
+
         stripMaster(regionServers);
         if (regionServers.isEmpty()) {
           LOG.warn("No Regions were moved - no servers available");
           return false;
+        } else {
+          LOG.info("Available servers {}", regionServers);
         }
         unloadRegions(server, regionServers, movedRegions);
       } catch (Exception e) {
@@ -440,6 +465,22 @@ public class RegionMover extends AbstractHBaseTool implements Closeable {
       return true;
     });
     return waitTaskToFinish(unloadPool, unloadTask, "unloading");
+  }
+
+  @VisibleForTesting
+   Collection<ServerName> filterRSGroupServers(RSGroupInfo rsgroup,
+      Collection<ServerName> onlineServers) {
+    if (rsgroup.getName().equals(RSGroupInfo.DEFAULT_GROUP)) {
+      return onlineServers;
+    }
+    List<ServerName> serverLists = new ArrayList<>(rsgroup.getServers().size());
+    for (ServerName server : onlineServers) {
+      Address address = Address.fromParts(server.getHostname(), server.getPort());
+      if (rsgroup.containsServer(address)) {
+        serverLists.add(server);
+      }
+    }
+    return serverLists;
   }
 
   private void unloadRegions(ServerName server, List<ServerName> regionServers,
@@ -544,9 +585,7 @@ public class RegionMover extends AbstractHBaseTool implements Closeable {
     while (EnvironmentEdgeManager.currentTime() < maxWait) {
       try {
         List<ServerName> regionServers = new ArrayList<>();
-        regionServers.addAll(
-            admin.getClusterMetrics(EnumSet.of(Option.LIVE_SERVERS)).getLiveServerMetrics()
-                .keySet());
+        regionServers.addAll(admin.getRegionServers());
         // Remove the host Region server from target Region Servers list
         server = stripServer(regionServers, hostname, port);
         if (server != null) {
@@ -716,7 +755,8 @@ public class RegionMover extends AbstractHBaseTool implements Closeable {
       return null;
     }
     HRegionLocation loc =
-      conn.getRegionLocator(region.getTable()).getRegionLocation(region.getStartKey(), true);
+      conn.getRegionLocator(region.getTable()).getRegionLocation(region.getStartKey(),
+        region.getReplicaId(),true);
     if (loc != null) {
       return loc.getServerName();
     } else {

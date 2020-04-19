@@ -35,7 +35,7 @@ import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.io.hfile.BlockCache;
-import org.apache.hadoop.hbase.testclassification.MediumTests;
+import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.junit.After;
 import org.junit.Before;
@@ -47,7 +47,7 @@ import org.junit.runners.Parameterized;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-@Category(MediumTests.class)
+@Category(LargeTests.class)
 @RunWith(Parameterized.class)
 public class TestClearRegionBlockCache {
 
@@ -117,8 +117,10 @@ public class TestClearRegionBlockCache {
       HTU.getNumHFilesForRS(rs2, TABLE_NAME, FAMILY));
     clearRegionBlockCache(rs2);
 
-    assertEquals(initialBlockCount1, blockCache1.getBlockCount());
-    assertEquals(initialBlockCount2, blockCache2.getBlockCount());
+    assertEquals("" + blockCache1.getBlockCount(),
+      initialBlockCount1, blockCache1.getBlockCount());
+    assertEquals("" + blockCache2.getBlockCount(),
+      initialBlockCount2, blockCache2.getBlockCount());
   }
 
   @Test

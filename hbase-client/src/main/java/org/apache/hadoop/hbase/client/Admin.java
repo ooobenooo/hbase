@@ -45,6 +45,7 @@ import org.apache.hadoop.hbase.client.replication.ReplicationPeerConfigUtil;
 import org.apache.hadoop.hbase.client.replication.TableCFs;
 import org.apache.hadoop.hbase.client.security.SecurityCapability;
 import org.apache.hadoop.hbase.ipc.CoprocessorRpcChannel;
+import org.apache.hadoop.hbase.net.Address;
 import org.apache.hadoop.hbase.quotas.QuotaFilter;
 import org.apache.hadoop.hbase.quotas.QuotaSettings;
 import org.apache.hadoop.hbase.quotas.SpaceQuotaSnapshotView;
@@ -53,6 +54,7 @@ import org.apache.hadoop.hbase.replication.ReplicationException;
 import org.apache.hadoop.hbase.replication.ReplicationPeerConfig;
 import org.apache.hadoop.hbase.replication.ReplicationPeerDescription;
 import org.apache.hadoop.hbase.replication.SyncReplicationState;
+import org.apache.hadoop.hbase.rsgroup.RSGroupInfo;
 import org.apache.hadoop.hbase.security.access.GetUserPermissionsRequest;
 import org.apache.hadoop.hbase.security.access.Permission;
 import org.apache.hadoop.hbase.security.access.UserPermission;
@@ -61,7 +63,10 @@ import org.apache.hadoop.hbase.snapshot.RestoreSnapshotException;
 import org.apache.hadoop.hbase.snapshot.SnapshotCreationException;
 import org.apache.hadoop.hbase.snapshot.UnknownSnapshotException;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.hbase.util.Pair;
 import org.apache.yetus.audience.InterfaceAudience;
+
+import org.apache.hbase.thirdparty.com.google.common.collect.ImmutableList;
 
 /**
  * The administrative API for HBase. Obtain an instance from {@link Connection#getAdmin()} and
@@ -123,6 +128,14 @@ public interface Admin extends Abortable, Closeable {
    * @throws IOException if a remote or network exception occurs
    */
   List<TableDescriptor> listTableDescriptors() throws IOException;
+
+  /**
+   * List all userspace tables and whether or not include system tables.
+   *
+   * @return a list of TableDescriptors
+   * @throws IOException if a remote or network exception occurs
+   */
+  List<TableDescriptor> listTableDescriptors(boolean includeSysTables) throws IOException;
 
   /**
    * List all the userspace tables that match the given pattern.
@@ -898,7 +911,10 @@ public interface Admin extends Abortable, Closeable {
    * @param forcible <code>true</code> if do a compulsory merge, otherwise we will only merge two
    *          adjacent regions
    * @throws IOException if a remote or network exception occurs
+   * @deprecated since 2.3.0 and will be removed in 4.0.0. Multi-region merge feature is now
+   *             supported. Use {@link #mergeRegionsAsync(byte[][], boolean)} instead.
    */
+  @Deprecated
   default Future<Void> mergeRegionsAsync(byte[] nameOfRegionA, byte[] nameOfRegionB,
       boolean forcible) throws IOException {
     byte[][] nameofRegionsToMerge = new byte[2][];
@@ -908,11 +924,7 @@ public interface Admin extends Abortable, Closeable {
   }
 
   /**
-   * Merge regions. Asynchronous operation.
-   * <p/>
-   * You may get a {@code DoNotRetryIOException} if you pass more than two regions in but the master
-   * does not support merging more than two regions. At least till 2.2.0, we still only support
-   * merging two regions.
+   * Merge multiple regions (>=2). Asynchronous operation.
    * @param nameofRegionsToMerge encoded or full name of daughter regions
    * @param forcible <code>true</code> if do a compulsory merge, otherwise we will only merge
    *          adjacent regions
@@ -1054,7 +1066,28 @@ public interface Admin extends Abortable, Closeable {
    * @throws IOException if a remote or network exception occurs
    */
   default Collection<ServerName> getRegionServers() throws IOException {
-    return getClusterMetrics(EnumSet.of(Option.LIVE_SERVERS)).getLiveServerMetrics().keySet();
+    return getRegionServers(false);
+  }
+
+  /**
+   * Retrieve all current live region servers including decommissioned
+   * if excludeDecommissionedRS is false, else non-decommissioned ones only
+   *
+   * @param excludeDecommissionedRS should we exclude decommissioned RS nodes
+   * @return all current live region servers including/excluding decommissioned hosts
+   * @throws IOException if a remote or network exception occurs
+   */
+  default Collection<ServerName> getRegionServers(boolean excludeDecommissionedRS)
+      throws IOException {
+    List<ServerName> allServers =
+      getClusterMetrics(EnumSet.of(Option.SERVERS_NAME)).getServersName();
+    if (!excludeDecommissionedRS) {
+      return allServers;
+    }
+    List<ServerName> decommissionedRegionServers = listDecommissionedRegionServers();
+    return allServers.stream()
+      .filter(s -> !decommissionedRegionServers.contains(s))
+      .collect(ImmutableList.toImmutableList());
   }
 
   /**
@@ -1690,19 +1723,26 @@ public interface Admin extends Abortable, Closeable {
   List<QuotaSettings> getQuota(QuotaFilter filter) throws IOException;
 
   /**
-   * Creates and returns a {@link com.google.protobuf.RpcChannel} instance connected to the active
-   * master. <p> The obtained {@link com.google.protobuf.RpcChannel} instance can be used to access
-   * a published coprocessor {@link com.google.protobuf.Service} using standard protobuf service
-   * invocations: </p> <div style="background-color: #cccccc; padding: 2px">
-   * <blockquote><pre>
+   * Creates and returns a {@link org.apache.hbase.thirdparty.com.google.protobuf.RpcChannel}
+   * instance connected to the active master.
+   * <p/>
+   * The obtained {@link org.apache.hbase.thirdparty.com.google.protobuf.RpcChannel} instance can be
+   * used to access a published coprocessor
+   * {@link org.apache.hbase.thirdparty.com.google.protobuf.Service} using standard protobuf service
+   * invocations:
+   * <p/>
+   * <div style="background-color: #cccccc; padding: 2px">
+   * <blockquote>
+   * <pre>
    * CoprocessorRpcChannel channel = myAdmin.coprocessorService();
    * MyService.BlockingInterface service = MyService.newBlockingStub(channel);
    * MyCallRequest request = MyCallRequest.newBuilder()
    *     ...
    *     .build();
    * MyCallResponse response = service.myCall(null, request);
-   * </pre></blockquote></div>
-   *
+   * </pre>
+   * </blockquote>
+   * </div>
    * @return A MasterCoprocessorRpcChannel instance
    * @deprecated since 3.0.0, will removed in 4.0.0. This is too low level, please stop using it any
    *             more. Use the coprocessorService methods in {@link AsyncAdmin} instead.
@@ -1712,24 +1752,25 @@ public interface Admin extends Abortable, Closeable {
 
 
   /**
-   * Creates and returns a {@link com.google.protobuf.RpcChannel} instance
-   * connected to the passed region server.
-   *
-   * <p>
-   * The obtained {@link com.google.protobuf.RpcChannel} instance can be used to access a published
-   * coprocessor {@link com.google.protobuf.Service} using standard protobuf service invocations:
-   * </p>
-   *
-   * <div style="background-color: #cccccc; padding: 2px">
-   * <blockquote><pre>
+   * Creates and returns a {@link org.apache.hbase.thirdparty.com.google.protobuf.RpcChannel}
+   * instance connected to the passed region server.
+   * <p/>
+   * The obtained {@link org.apache.hbase.thirdparty.com.google.protobuf.RpcChannel} instance can be
+   * used to access a published coprocessor
+   * {@link org.apache.hbase.thirdparty.com.google.protobuf.Service} using standard protobuf service
+   * invocations:
+   * <p/>
+   * <div style="background-color: #cccccc; padding: 2px"> <blockquote>
+   * <pre>
    * CoprocessorRpcChannel channel = myAdmin.coprocessorService(serverName);
    * MyService.BlockingInterface service = MyService.newBlockingStub(channel);
    * MyCallRequest request = MyCallRequest.newBuilder()
    *     ...
    *     .build();
    * MyCallResponse response = service.myCall(null, request);
-   * </pre></blockquote></div>
-   *
+   * </pre>
+   * </blockquote>
+   * </div>
    * @param serverName the server name to which the endpoint call is made
    * @return A RegionServerCoprocessorRpcChannel instance
    * @deprecated since 3.0.0, will removed in 4.0.0. This is too low level, please stop using it any
@@ -2232,4 +2273,159 @@ public interface Admin extends Abortable, Closeable {
   default List<Boolean> hasUserPermissions(List<Permission> permissions) throws IOException {
     return hasUserPermissions(null, permissions);
   }
+
+  /**
+   * Turn on or off the auto snapshot cleanup based on TTL.
+   *
+   * @param on Set to <code>true</code> to enable, <code>false</code> to disable.
+   * @param synchronous If <code>true</code>, it waits until current snapshot cleanup is completed,
+   *   if outstanding.
+   * @return Previous auto snapshot cleanup value
+   * @throws IOException if a remote or network exception occurs
+   */
+  boolean snapshotCleanupSwitch(final boolean on, final boolean synchronous)
+      throws IOException;
+
+  /**
+   * Query the current state of the auto snapshot cleanup based on TTL.
+   *
+   * @return <code>true</code> if the auto snapshot cleanup is enabled,
+   *   <code>false</code> otherwise.
+   * @throws IOException if a remote or network exception occurs
+   */
+  boolean isSnapshotCleanupEnabled() throws IOException;
+
+  /**
+   * Retrieves online slow/large RPC logs from the provided list of
+   * RegionServers
+   *
+   * @param serverNames Server names to get slowlog responses from
+   * @param logQueryFilter filter to be used if provided (determines slow / large RPC logs)
+   * @return online slowlog response list
+   * @throws IOException if a remote or network exception occurs
+   */
+  List<OnlineLogRecord> getSlowLogResponses(final Set<ServerName> serverNames,
+      final LogQueryFilter logQueryFilter) throws IOException;
+
+  /**
+   * Clears online slow/large RPC logs from the provided list of
+   * RegionServers
+   *
+   * @param serverNames Set of Server names to clean slowlog responses from
+   * @return List of booleans representing if online slowlog response buffer is cleaned
+   *   from each RegionServer
+   * @throws IOException if a remote or network exception occurs
+   */
+  List<Boolean> clearSlowLogResponses(final Set<ServerName> serverNames)
+      throws IOException;
+
+  /**
+   * Creates a new RegionServer group with the given name
+   * @param groupName the name of the group
+   * @throws IOException if a remote or network exception occurs
+   */
+  void addRSGroup(String groupName) throws IOException;
+
+  /**
+   * Get group info for the given group name
+   * @param groupName the group name
+   * @return group info
+   * @throws IOException if a remote or network exception occurs
+   */
+  RSGroupInfo getRSGroup(String groupName) throws IOException;
+
+  /**
+   * Get group info for the given hostPort
+   * @param hostPort HostPort to get RSGroupInfo for
+   * @throws IOException if a remote or network exception occurs
+   */
+  RSGroupInfo getRSGroup(Address hostPort) throws IOException;
+
+  /**
+   * Get group info for the given table
+   * @param tableName table name to get RSGroupInfo for
+   * @throws IOException if a remote or network exception occurs
+   */
+  RSGroupInfo getRSGroup(TableName tableName) throws IOException;
+
+  /**
+   * Lists current set of RegionServer groups
+   * @throws IOException if a remote or network exception occurs
+   */
+  List<RSGroupInfo> listRSGroups() throws IOException;
+
+  /**
+   * Get all tables in this RegionServer group.
+   * @param groupName the group name
+   * @throws IOException if a remote or network exception occurs
+   * @see #getConfiguredNamespacesAndTablesInRSGroup(String)
+   */
+  List<TableName> listTablesInRSGroup(String groupName) throws IOException;
+
+  /**
+   * Get the namespaces and tables which have this RegionServer group in descriptor.
+   * <p/>
+   * The difference between this method and {@link #listTablesInRSGroup(String)} is that, this
+   * method will not include the table which is actually in this RegionServr group but without the
+   * RegionServer group configuration in its {@link TableDescriptor}. For example, we have a group
+   * 'A', and we make namespace 'nsA' in this group, then all the tables under this namespace will
+   * in the group 'A', but this method will not return these tables but only the namespace 'nsA',
+   * while the {@link #listTablesInRSGroup(String)} will return all these tables.
+   * @param groupName the group name
+   * @throws IOException if a remote or network exception occurs
+   * @see #listTablesInRSGroup(String)
+   */
+  Pair<List<String>, List<TableName>> getConfiguredNamespacesAndTablesInRSGroup(String groupName)
+    throws IOException;
+
+  /**
+   * Remove RegionServer group associated with the given name
+   * @param groupName the group name
+   * @throws IOException if a remote or network exception occurs
+   */
+  void removeRSGroup(String groupName) throws IOException;
+
+  /**
+   * Remove decommissioned servers from group
+   *  1. Sometimes we may find the server aborted due to some hardware failure and we must offline
+   *     the server for repairing. Or we need to move some servers to join other clusters.
+   *     So we need to remove these servers from the group.
+   *  2. Dead/recovering/live servers will be disallowed.
+   * @param servers set of servers to remove
+   * @throws IOException if a remote or network exception occurs
+   */
+  void removeServersFromRSGroup(Set<Address> servers) throws IOException;
+
+  /**
+   * Move given set of servers to the specified target RegionServer group
+   * @param servers set of servers to move
+   * @param targetGroup the group to move servers to
+   * @throws IOException if a remote or network exception occurs
+   */
+  void moveServersToRSGroup(Set<Address> servers, String targetGroup) throws IOException;
+
+  /**
+   * Set the RegionServer group for tables
+   * @param tables tables to set group for
+   * @param groupName group name for tables
+   * @throws IOException if a remote or network exception occurs
+   */
+  void setRSGroup(Set<TableName> tables, String groupName) throws IOException;
+
+  /**
+   * Balance regions in the given RegionServer group
+   * @param groupName the group name
+   * @return boolean Whether balance ran or not
+   * @throws IOException if a remote or network exception occurs
+   */
+  boolean balanceRSGroup(String groupName) throws IOException;
+
+  /**
+   * Rename rsgroup
+   * @param oldName old rsgroup name
+   * @param newName new rsgroup name
+   * @throws IOException if a remote or network exception occurs
+   */
+  void renameRSGroup(String oldName, String newName) throws IOException;
+
 }

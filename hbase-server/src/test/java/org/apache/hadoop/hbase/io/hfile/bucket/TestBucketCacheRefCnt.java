@@ -38,12 +38,12 @@ import org.apache.hadoop.hbase.io.hfile.HFileContextBuilder;
 import org.apache.hadoop.hbase.io.hfile.bucket.BucketCache.WriterThread;
 import org.apache.hadoop.hbase.nio.ByteBuff;
 import org.apache.hadoop.hbase.testclassification.IOTests;
-import org.apache.hadoop.hbase.testclassification.MediumTests;
+import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.junit.ClassRule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 
-@Category({ IOTests.class, MediumTests.class })
+@Category({ IOTests.class, SmallTests.class })
 public class TestBucketCacheRefCnt {
 
   @ClassRule
@@ -87,14 +87,18 @@ public class TestBucketCacheRefCnt {
     }
   }
 
-  @Test
+  @org.junit.Ignore @Test // Disabled by HBASE-24079. Reenable issue HBASE-24082
+  // Flakey TestBucketCacheRefCnt.testBlockInRAMCache:121 expected:<3> but was:<2>
   public void testBlockInRAMCache() throws IOException {
     cache = create(1, 1000);
+    // Set this to true;
+    cache.wait_when_cache = true;
     disableWriter();
+    final String prefix = "testBlockInRamCache";
     try {
       for (int i = 0; i < 10; i++) {
         HFileBlock blk = createBlock(i, 1020);
-        BlockCacheKey key = createKey("testHFile-00", i);
+        BlockCacheKey key = createKey(prefix, i);
         assertEquals(1, blk.refCnt());
         cache.cacheBlock(key, blk);
         assertEquals(i + 1, cache.getBlockCount());
@@ -113,7 +117,7 @@ public class TestBucketCacheRefCnt {
       }
 
       for (int i = 0; i < 10; i++) {
-        BlockCacheKey key = createKey("testHFile-00", i);
+        BlockCacheKey key = createKey(prefix, i);
         Cacheable blk = cache.getBlock(key, false, false, false);
         assertEquals(3, blk.refCnt());
         assertFalse(blk.release());

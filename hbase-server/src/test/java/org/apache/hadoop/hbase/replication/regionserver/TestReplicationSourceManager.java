@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -24,7 +24,6 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
-
 import java.io.IOException;
 import java.lang.reflect.Field;
 import java.net.URLEncoder;
@@ -64,8 +63,8 @@ import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.client.RegionInfoBuilder;
 import org.apache.hadoop.hbase.client.TableDescriptor;
 import org.apache.hadoop.hbase.client.TableDescriptorBuilder;
-import org.apache.hadoop.hbase.regionserver.HRegionServer;
 import org.apache.hadoop.hbase.regionserver.MultiVersionConcurrencyControl;
+import org.apache.hadoop.hbase.regionserver.RegionServerServices;
 import org.apache.hadoop.hbase.replication.ReplicationFactory;
 import org.apache.hadoop.hbase.replication.ReplicationPeer;
 import org.apache.hadoop.hbase.replication.ReplicationPeerConfig;
@@ -101,10 +100,8 @@ import org.junit.experimental.categories.Category;
 import org.junit.rules.TestName;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
 import org.apache.hbase.thirdparty.com.google.common.collect.Sets;
 import org.apache.hbase.thirdparty.com.google.protobuf.UnsafeByteOperations;
-
 import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.WALProtos;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.WALProtos.BulkLoadDescriptor;
@@ -229,7 +226,7 @@ public abstract class TestReplicationSourceManager {
     return utility.getMiniHBaseCluster().getRegionServerThreads()
         .stream().map(JVMClusterUtil.RegionServerThread::getRegionServer)
         .findAny()
-        .map(HRegionServer::getReplicationSourceService)
+        .map(RegionServerServices::getReplicationSourceService)
         .map(r -> (Replication)r)
         .map(Replication::getReplicationManager)
         .get();
@@ -300,11 +297,9 @@ public abstract class TestReplicationSourceManager {
         wal.rollWriter();
       }
       LOG.info(Long.toString(i));
-      final long txid = wal.append(
-          hri,
-          new WALKeyImpl(hri.getEncodedNameAsBytes(), test, System.currentTimeMillis(), mvcc, scopes),
-          edit,
-          true);
+      final long txid = wal.appendData(hri,
+        new WALKeyImpl(hri.getEncodedNameAsBytes(), test, System.currentTimeMillis(), mvcc, scopes),
+        edit);
       wal.sync(txid);
     }
 
@@ -316,9 +311,9 @@ public abstract class TestReplicationSourceManager {
     LOG.info(baseline + " and " + time);
 
     for (int i = 0; i < 3; i++) {
-      wal.append(hri,
+      wal.appendData(hri,
         new WALKeyImpl(hri.getEncodedNameAsBytes(), test, System.currentTimeMillis(), mvcc, scopes),
-        edit, true);
+        edit);
     }
     wal.sync();
 
@@ -338,9 +333,9 @@ public abstract class TestReplicationSourceManager {
     manager.logPositionAndCleanOldLogs(source,
       new WALEntryBatch(0, manager.getSources().get(0).getCurrentPath()));
 
-    wal.append(hri,
+    wal.appendData(hri,
       new WALKeyImpl(hri.getEncodedNameAsBytes(), test, System.currentTimeMillis(), mvcc, scopes),
-      edit, true);
+      edit);
     wal.sync();
 
     assertEquals(1, manager.getWALs().size());
@@ -504,7 +499,7 @@ public abstract class TestReplicationSourceManager {
     String replicationSourceImplName = conf.get("replication.replicationsource.implementation");
     final String peerId = "FakePeer";
     final ReplicationPeerConfig peerConfig = ReplicationPeerConfig.newBuilder()
-      .setClusterKey("localhost:" + utility.getZkCluster().getClientPort() + ":/hbase").build();
+      .setClusterKey(utility.getZkCluster().getAddress().toString() + ":/hbase").build();
     try {
       DummyServer server = new DummyServer();
       ReplicationQueueStorage rq = ReplicationStorageFactory
@@ -548,7 +543,7 @@ public abstract class TestReplicationSourceManager {
     }
     return utility.getMiniHBaseCluster().getRegionServerThreads()
         .stream().map(JVMClusterUtil.RegionServerThread::getRegionServer)
-        .map(HRegionServer::getReplicationSourceService)
+        .map(RegionServerServices::getReplicationSourceService)
         .map(r -> (Replication)r)
         .map(Replication::getReplicationManager)
         .mapToLong(ReplicationSourceManager::getSizeOfLatestPath)
@@ -559,7 +554,7 @@ public abstract class TestReplicationSourceManager {
   public void testRemovePeerMetricsCleanup() throws Exception {
     final String peerId = "DummyPeer";
     final ReplicationPeerConfig peerConfig = ReplicationPeerConfig.newBuilder()
-      .setClusterKey("localhost:" + utility.getZkCluster().getClientPort() + ":/hbase").build();
+      .setClusterKey(utility.getZkCluster().getAddress().toString() + ":/hbase").build();
     try {
       MetricsReplicationSourceSource globalSource = getGlobalSource();
       final int globalLogQueueSizeInitial = globalSource.getSizeOfLogQueue();
@@ -702,8 +697,6 @@ public abstract class TestReplicationSourceManager {
 
   /**
    * Remove a peer and wait for it to get cleaned up
-   * @param peerId
-   * @throws Exception
    */
   private void removePeerAndWait(final String peerId) throws Exception {
     final ReplicationPeers rp = manager.getReplicationPeers();

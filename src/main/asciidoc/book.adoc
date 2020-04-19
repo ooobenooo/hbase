@@ -38,6 +38,7 @@
 :experimental:
 :source-language: java
 :leveloffset: 0
+:stem:
 
 // Logo for HTML -- doesn't render in PDF
 ifdef::backend-html5[]
@@ -86,6 +87,7 @@ include::_chapters/pv2.adoc[]
 include::_chapters/amv2.adoc[]
 include::_chapters/zookeeper.adoc[]
 include::_chapters/community.adoc[]
+include::_chapters/hbtop.adoc[]
 
 = Appendix
 
@@ -100,6 +102,5 @@ include::_chapters/other_info.adoc[]
 include::_chapters/hbase_history.adoc[]
 include::_chapters/asf.adoc[]
 include::_chapters/orca.adoc[]
-include::_chapters/tracing.adoc[]
 include::_chapters/rpc.adoc[]
 include::_chapters/appendix_hbase_incompatibilities.adoc[]

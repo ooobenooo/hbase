@@ -31,8 +31,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.NavigableSet;
 import java.util.Set;
+
+import org.apache.hadoop.hbase.client.ColumnFamilyDescriptor;
+import org.apache.hadoop.hbase.client.ColumnFamilyDescriptorBuilder;
 import org.apache.hadoop.hbase.client.Get;
 import org.apache.hadoop.hbase.client.Scan;
+import org.apache.hadoop.hbase.client.TableDescriptor;
+import org.apache.hadoop.hbase.client.TableDescriptorBuilder;
 import org.apache.hadoop.hbase.filter.BinaryComparator;
 import org.apache.hadoop.hbase.filter.Filter;
 import org.apache.hadoop.hbase.filter.PrefixFilter;
@@ -173,12 +178,16 @@ public class TestSerialization {
   }
 
   private HRegionInfo createRandomRegion(final String name) {
-    HTableDescriptor htd = new HTableDescriptor(TableName.valueOf(name));
-    String [] families = new String [] {"info", "anchor"};
+    TableDescriptorBuilder tableDescriptorBuilder =
+      TableDescriptorBuilder.newBuilder(TableName.valueOf(name));
+    String[] families = new String[]{"info", "anchor"};
     for (int i = 0; i < families.length; i++) {
-      htd.addFamily(new HColumnDescriptor(families[i]));
+      ColumnFamilyDescriptor columnFamilyDescriptor =
+        ColumnFamilyDescriptorBuilder.newBuilder(Bytes.toBytes(families[i])).build();
+      tableDescriptorBuilder.setColumnFamily(columnFamilyDescriptor);
     }
-    return new HRegionInfo(htd.getTableName(), HConstants.EMPTY_START_ROW,
+    TableDescriptor tableDescriptor = tableDescriptorBuilder.build();
+    return new HRegionInfo(tableDescriptor.getTableName(), HConstants.EMPTY_START_ROW,
       HConstants.EMPTY_END_ROW);
   }
 
@@ -337,10 +346,10 @@ public class TestSerialization {
     long ts = System.currentTimeMillis();
     int maxVersions = 2;
 
-    Scan scan = new Scan(startRow, stopRow);
+    Scan scan = new Scan().withStartRow(startRow).withStopRow(stopRow);
     scan.addColumn(fam, qf1);
     scan.setTimeRange(ts, ts+1);
-    scan.setMaxVersions(maxVersions);
+    scan.readVersions(maxVersions);
 
     ClientProtos.Scan scanProto = ProtobufUtil.toScan(scan);
     Scan desScan = ProtobufUtil.toScan(scanProto);
@@ -361,7 +370,7 @@ public class TestSerialization {
       }
 
       // Test filters are serialized properly.
-      scan = new Scan(startRow);
+      scan = new Scan().withStartRow(startRow);
       final String name = "testScan";
       byte [] prefix = Bytes.toBytes(name);
       scan.setFilter(new PrefixFilter(prefix));
@@ -580,19 +589,23 @@ public class TestSerialization {
    */
   protected HTableDescriptor createTableDescriptor(final String name,
       final int versions) {
-    HTableDescriptor htd = new HTableDescriptor(TableName.valueOf(name));
-    htd.addFamily(new HColumnDescriptor(fam1)
+    TableDescriptorBuilder.ModifyableTableDescriptor tableDescriptor =
+      new TableDescriptorBuilder.ModifyableTableDescriptor(TableName.valueOf(name));
+    tableDescriptor.setColumnFamily(
+      new ColumnFamilyDescriptorBuilder.ModifyableColumnFamilyDescriptor(fam1)
         .setMaxVersions(versions)
         .setBlockCacheEnabled(false)
     );
-    htd.addFamily(new HColumnDescriptor(fam2)
+    tableDescriptor.setColumnFamily(
+      new ColumnFamilyDescriptorBuilder.ModifyableColumnFamilyDescriptor(fam2)
         .setMaxVersions(versions)
         .setBlockCacheEnabled(false)
     );
-    htd.addFamily(new HColumnDescriptor(fam3)
+    tableDescriptor.setColumnFamily(
+      new ColumnFamilyDescriptorBuilder.ModifyableColumnFamilyDescriptor(fam3)
         .setMaxVersions(versions)
         .setBlockCacheEnabled(false)
     );
-    return htd;
+    return new HTableDescriptor(tableDescriptor);
   }
 }

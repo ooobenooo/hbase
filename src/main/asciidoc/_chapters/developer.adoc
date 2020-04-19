@@ -284,22 +284,37 @@ For additional information on setting up Eclipse for HBase development on Window
 
 === IntelliJ IDEA
 
-You can set up IntelliJ IDEA for similar functionality as Eclipse.
-Follow these steps.
+A functional development environment can be setup around an IntelliJ IDEA installation that has the
+plugins necessary for building Java projects with Maven.
 
-. Select
-. You do not need to select a profile.
-  Be sure [label]#Maven project
-  required# is selected, and click btn:[Next].
-. Select the location for the JDK.
+. Use either File > New > "Project from Existing Sources..." or "Project From Version Control.."
+. Depending on your version of IntelliJ, you may need to choose Maven as the "project" or "model"
+type.
 
-.Using the HBase Formatter in IntelliJ IDEA
-Using the Eclipse Code Formatter plugin for IntelliJ IDEA, you can import the HBase code formatter described in <<eclipse.code.formatting,eclipse.code.formatting>>.
+The following plugins are recommended:
+
+. Maven, bundled. This allows IntelliJ to resolve dependencies and recognize the project structure.
+. EditorConfig, bundled. This will apply project whitespace settings found in the the
+`.editorconfig` file available on branches with
+link:https://issues.apache.org/jira/browse/HBASE-23234[HBASE-23234] or later.
+. link:https://plugins.jetbrains.com/plugin/1065-checkstyle-idea/[Checkstyle-IDEA]. Configure this
+against the configuration file found under `hbase-checkstyle/src/main/resources/hbase/checkstyle.xml`
+(If the Intellij checkstyle plugin complains parsing the volunteered hbase `checkstyle.xml`, make
+sure the plugin's `version` popup menu matches the hbase checkstyle version -- see
+link:https://issues.apache.org/jira/browse/HBASE-23242[HBASE-23242] for more).
+This plugin will highlight style errors in the IDE, so you can fix them before they get flagged during the
+pre-commit process.
+. link:https://plugins.jetbrains.com/plugin/8277-protobuf-support/[Protobuf Support]. HBase uses
+link:https://developers.google.com/protocol-buffers/[Protocol Buffers] in a number of places where
+serialization is required. This plugin is helpful when editing these object definitions.
+. link:https://plugins.jetbrains.com/plugin/7391-asciidoc/[AsciiDoc]. HBase uses
+link:http://asciidoc.org[AsciiDoc] for  building it's project documentation. This plugin is helpful
+when editing this book.
 
 === Other IDEs
 
-It would be useful to mirror the <<eclipse,eclipse>> set-up instructions for other IDEs.
-If you would like to assist, please have a look at link:https://issues.apache.org/jira/browse/HBASE-11704[HBASE-11704].
+If you'd have another environment with which you'd like to develop on HBase, please consider
+documenting your setup process here.
 
 [[build]]
 == Building Apache HBase
@@ -1257,12 +1272,17 @@ Small Tests (((SmallTests)))::
   _Small_ test cases are executed in a shared JVM and each test suite/test class should
    run in 15 seconds or less; i.e. a link:https://en.wikipedia.org/wiki/JUnit[junit test fixture], a java object made
    up of test methods, should finish in under 15 seconds, no matter how many or how few test methods
-   it has. These test cases should not use a minicluster.
+   it has. These test cases should not use a minicluster as a minicluster starts many services,
+   most unrelated to what is being tested. Multiple start/stops may leak resources or just overwhelm
+   the single JVM context.
 
 Medium Tests (((MediumTests)))::
   _Medium_ test cases are executed in separate JVM and individual test suites or test classes or in
   junit parlance, link:https://en.wikipedia.org/wiki/JUnit[test fixture], should run in 50 seconds
-   or less. These test cases can use a mini cluster.
+   or less. These test cases can use a mini cluster. Since we start up a JVM per test fixture (and
+   often a cluster too), be sure to make the startup pay by writing test fixtures that do a lot of
+   testing running tens of seconds perhaps combining test rather than spin up a jvm (and cluster)
+   per test method; this practice will help w/ overall test times.
 
 Large Tests (((LargeTests)))::
   _Large_ test cases are everything else. They are typically large-scale tests, regression tests
@@ -1278,22 +1298,46 @@ Integration Tests (((IntegrationTests)))::
 [[hbase.unittests.cmds]]
 === Running tests
 
+The state of tests on the hbase branches varies. Some branches keep good test hygiene and all tests pass
+reliably with perhaps an unlucky sporadic flakey test failure. On other branches, the case may be less so with
+frequent flakies and even broken tests in need of attention that fail 100% of the time. Try and figure
+the state of tests on the branch you are currently interested in; the current state of nightly
+link:https://builds.apache.org/view/H-L/view/HBase/job/HBase%20Nightly/[apache jenkins builds] is a good
+place to start. Tests on master branch are generally not in the best of condition as releases
+are less frequent off master. This can make it hard landing patches especially given our dictum that
+patches land on master branch first.
+
+The full test suite can take from 5-6 hours on an anemic VM with 4 CPUs and minimal
+parallelism to 50 minutes or less on a linux machine with dozens of CPUs and plenty of
+RAM.
+
+When you go to run the full test suite, make sure you up the test runner user nproc
+(`ulimit -u` -- make sure it > 6000 or more if more parallelism) and the number of
+open files (`ulimit -n` -- make sure it > 10240 or more) limits on your system.
+Errors because the test run hits
+limits are often only opaquely related to the constraint. You can see the current
+user settings by running `ulimit -a`.
+
 [[hbase.unittests.cmds.test]]
 ==== Default: small and medium category tests
 
-Running `mvn test` will execute all small tests in a single JVM (no fork) and then medium tests in a separate JVM for each test instance.
-Medium tests are NOT executed if there is an error in a small test. Large tests are NOT executed.
+Running `mvn test` will execute all small tests in a single JVM (no fork) and then medium tests in a
+forked, separate JVM for each test instance (For definition of 'small' test and so on, see
+<<hbase.unittests>>). Medium tests are NOT executed if there is an error in a
+small test. Large tests are NOT executed.
 
 [[hbase.unittests.cmds.test.runalltests]]
 ==== Running all tests
 
-Running `mvn test -P runAllTests` will execute small tests in a single JVM then medium and large tests in a separate JVM for each test.
-Medium and large tests are NOT executed if there is an error in a small test.
+Running `mvn test -P runAllTests` will execute small tests in a single JVM, then medium and large tests
+in a forked, separate JVM for each test. Medium and large tests are NOT executed if there is an error in
+a small test.
 
 [[hbase.unittests.cmds.test.localtests.mytest]]
 ==== Running a single test or all tests in a package
 
-To run an individual test, e.g. `MyTest`, rum `mvn test -Dtest=MyTest` You can also pass multiple, individual tests as a comma-delimited list:
+To run an individual test, e.g. `MyTest`, rum `mvn test -Dtest=MyTest` You can also pass multiple,
+individual tests as a comma-delimited list:
 [source,bash]
 ----
 mvn test  -Dtest=MyTest1,MyTest2,MyTest3
@@ -1305,10 +1349,12 @@ mvn test '-Dtest=org.apache.hadoop.hbase.client.*'
 ----
 
 When `-Dtest` is specified, the `localTests` profile will be used.
-Each junit test is executed in a separate JVM (A fork per test class). There is no parallelization when tests are running in this mode.
+Each junit test is executed in a separate JVM (A fork per test class).
+There is no parallelization when tests are running in this mode.
 You will see a new message at the end of the -report: `"[INFO] Tests are skipped"`.
-It's harmless.
-However, you need to make sure the sum of `Tests run:` in the `Results:` section of test reports matching the number of tests you specified because no error will be reported when a non-existent test case is specified.
+It's harmless.  However, you need to make sure the sum of
+`Tests run:` in the `Results:` section of test reports matching the number of tests
+you specified because no error will be reported when a non-existent test case is specified.
 
 [[hbase.unittests.cmds.test.profiles]]
 ==== Other test invocation permutations
@@ -1324,17 +1370,36 @@ For convenience, you can run `mvn test -P runDevTests` to execute both small and
 [[hbase.unittests.test.faster]]
 ==== Running tests faster
 
-By default, `$ mvn test -P runAllTests` runs 5 tests in parallel.
-It can be increased on a developer's machine.
-Allowing that you can have 2 tests in parallel per core, and you need about 2GB of memory per test (at the extreme), if you have an 8 core, 24GB box, you can have 16 tests in parallel.
-but the memory available limits it to 12 (24/2), To run all tests with 12 tests in parallel, do this: +mvn test -P runAllTests
-                        -Dsurefire.secondPartForkCount=12+.
-If using a version earlier than  2.0, do: +mvn test -P runAllTests -Dsurefire.secondPartThreadCount=12
-                    +.
-To increase the speed, you can as well use a ramdisk.
-You will need 2GB  of memory to run all tests.
-You will also need to delete the files between two  test run.
-The typical way to configure a ramdisk on Linux is:
+By default, `$ mvn test -P runAllTests` runs all tests using a quarter of the CPUs available on machine
+hosting the test run (see `surefire.firstPartForkCount` and `surefire.secondPartForkCount` in the top-level
+hbase `pom.xml` which default to 0.25C, or 1/4 of CPU count). Up these counts to get the build to run faster.
+You can also have hbase modules
+run their tests in parrallel when the dependency graph allows by passing `--threads=N` when you invoke
+maven, where `N` is the amount of parallelism wanted.
+maven, where `N` is the amount of _module_ parallelism wanted.
+
+For example, allowing that you want to use all cores on a machine to run tests,
+you could start up the maven test run with:
+
+----
+  $ x="1.0C";  mvn -Dsurefire.firstPartForkCount=$x -Dsurefire.secondPartForkCount=$x test -PrunAllTests
+----
+
+If a 32 core machine, you should see periods during which 32 forked jvms appear in your process listing each running unit tests.
+Your milage may vary. Dependent on hardware, overcommittment of CPU and/or memory can bring the test suite crashing down,
+usually complaining with a spew of test system exits and incomplete test report xml files. Start gently, with the default fork
+and move up gradually.
+
+Adding the `--threads=N`, maven will run N maven modules in parallel (when module inter-dependencies allow). Be aware, if you have
+set the forkcount to `1.0C`, and the `--threads` count to '2', the number of concurrent test runners can approach
+2 * CPU, a count likely to overcommit the host machine (with attendant test exits failures).
+
+You will need ~2.2GB of memory per forked JVM plus the memory used by maven itself (3-4G).
+
+===== RAM Disk
+
+To increase the speed, you can as well use a ramdisk. 2-3G should be sufficient. Be sure to
+delete the files between each test run. The typical way to configure a ramdisk on Linux is:
 
 ----
 $ sudo mkdir /ram2G
@@ -1344,17 +1409,7 @@ sudo mount -t tmpfs -o size=2048M tmpfs /ram2G
 You can then use it to run all HBase tests on 2.0 with the command:
 
 ----
-mvn test
-                        -P runAllTests -Dsurefire.secondPartForkCount=12
-                        -Dtest.build.data.basedirectory=/ram2G
-----
-
-On earlier versions, use:
-
-----
-mvn test
-                        -P runAllTests -Dsurefire.secondPartThreadCount=12
-                        -Dtest.build.data.basedirectory=/ram2G
+mvn test -PrunAllTests -Dtest.build.data.basedirectory=/ram2G
 ----
 
 [[hbase.unittests.cmds.test.hbasetests]]
@@ -2227,6 +2282,30 @@ Patches larger than one screen, or patches that will be tricky to review, should
 For more information on how to use ReviewBoard, see link:http://www.reviewboard.org/docs/manual/1.5/[the ReviewBoard
                         documentation].
 
+[[github]]
+==== GitHub
+Submitting link:https://github.com/apache/hbase[GitHub] pull requests is another accepted form of
+contributing patches. Refer to GitHub link:https://help.github.com/[documentation] for details on
+how to create pull requests.
+
+NOTE: This section is incomplete and needs to be updated. Refer to
+link:https://issues.apache.org/jira/browse/HBASE-23557[HBASE-23557]
+
+===== GitHub Tooling
+
+====== Browser bookmarks
+
+Following is a useful javascript based browser bookmark that redirects from GitHub pull
+requests to the corresponding jira work item. This redirects based on the HBase jira  ID mentioned
+in the issue title for the PR. Add the following javascript snippet as a browser bookmark to the
+tool bar. Clicking on it while you are on an HBase GitHub PR page redirects you to the corresponding
+jira item.
+
+[source, javascript]
+-----
+javascript:location.href='https://issues.apache.org/jira/browse/'+document.getElementsByClassName("js-issue-title")[0].innerHTML.match(/HBASE-\d+/)[0];
+-----
+
 ==== Guide for HBase Committers
 
 ===== Becoming a committer
@@ -2315,7 +2394,7 @@ then wait for a `+1` response from another committer before committing.
 
 Patches which do not adhere to the guidelines in
 link:https://hbase.apache.org/book.html#developer[HowToContribute] and to the
-link:https://wiki.apache.org/hadoop/CodeReviewChecklist[code review checklist]
+link:https://cwiki.apache.org/confluence/display/HADOOP2/CodeReviewChecklist[code review checklist]
 should be rejected. Committers should always be polite to contributors and try
 to instruct and encourage them to contribute better patches. If a committer
 wishes to improve an unacceptable patch, then it should first be rejected, and a

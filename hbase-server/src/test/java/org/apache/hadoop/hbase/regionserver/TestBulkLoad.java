@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -22,7 +22,6 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -40,18 +39,20 @@ import java.util.Random;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hbase.CellBuilderType;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.DoNotRetryIOException;
+import org.apache.hadoop.hbase.ExtendedCellBuilderFactory;
 import org.apache.hadoop.hbase.HBaseClassTestRule;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
-import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HRegionInfo;
-import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.client.ColumnFamilyDescriptorBuilder;
+import org.apache.hadoop.hbase.client.TableDescriptorBuilder;
 import org.apache.hadoop.hbase.io.hfile.HFile;
-import org.apache.hadoop.hbase.io.hfile.HFileContext;
+import org.apache.hadoop.hbase.io.hfile.HFileContextBuilder;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Pair;
@@ -94,6 +95,7 @@ public class TestBulkLoad {
   private final byte[] randomBytes = new byte[100];
   private final byte[] family1 = Bytes.toBytes("family1");
   private final byte[] family2 = Bytes.toBytes("family2");
+  private final byte[] family3 = Bytes.toBytes("family3");
 
   @Rule
   public TestName name = new TestName();
@@ -113,21 +115,20 @@ public class TestBulkLoad {
     storeFileName = (new Path(storeFileName)).getName();
     List<String> storeFileNames = new ArrayList<>();
     storeFileNames.add(storeFileName);
-    when(log.append(any(), any(),
-            argThat(bulkLogWalEdit(WALEdit.BULK_LOAD, tableName.toBytes(),
-                    familyName, storeFileNames)),
-            anyBoolean())).thenAnswer(new Answer() {
-              @Override
-              public Object answer(InvocationOnMock invocation) {
-                WALKeyImpl walKey = invocation.getArgument(1);
-                MultiVersionConcurrencyControl mvcc = walKey.getMvcc();
-                if (mvcc != null) {
-                  MultiVersionConcurrencyControl.WriteEntry we = mvcc.begin();
-                  walKey.setWriteEntry(we);
-                }
-                return 01L;
-              }
-    });
+    when(log.appendMarker(any(), any(),
+      argThat(bulkLogWalEdit(WALEdit.BULK_LOAD, tableName.toBytes(), familyName, storeFileNames))))
+        .thenAnswer(new Answer() {
+          @Override
+          public Object answer(InvocationOnMock invocation) {
+            WALKeyImpl walKey = invocation.getArgument(1);
+            MultiVersionConcurrencyControl mvcc = walKey.getMvcc();
+            if (mvcc != null) {
+              MultiVersionConcurrencyControl.WriteEntry we = mvcc.begin();
+              walKey.setWriteEntry(we);
+            }
+            return 01L;
+          }
+        });
     testRegionWithFamiliesAndSpecifiedTableName(tableName, family1)
         .bulkLoadHFiles(familyPaths, false, null);
     verify(log).sync(anyLong());
@@ -140,9 +141,8 @@ public class TestBulkLoad {
 
   @Test
   public void shouldBulkLoadSingleFamilyHLog() throws IOException {
-    when(log.append(any(),
-            any(), argThat(bulkLogWalEditType(WALEdit.BULK_LOAD)),
-            anyBoolean())).thenAnswer(new Answer() {
+    when(log.appendMarker(any(),
+            any(), argThat(bulkLogWalEditType(WALEdit.BULK_LOAD)))).thenAnswer(new Answer() {
               @Override
               public Object answer(InvocationOnMock invocation) {
                 WALKeyImpl walKey = invocation.getArgument(1);
@@ -160,9 +160,8 @@ public class TestBulkLoad {
 
   @Test
   public void shouldBulkLoadManyFamilyHLog() throws IOException {
-    when(log.append(any(),
-            any(), argThat(bulkLogWalEditType(WALEdit.BULK_LOAD)),
-            anyBoolean())).thenAnswer(new Answer() {
+    when(log.appendMarker(any(),
+            any(), argThat(bulkLogWalEditType(WALEdit.BULK_LOAD)))).thenAnswer(new Answer() {
               @Override
               public Object answer(InvocationOnMock invocation) {
                 WALKeyImpl walKey = invocation.getArgument(1);
@@ -181,9 +180,8 @@ public class TestBulkLoad {
 
   @Test
   public void shouldBulkLoadManyFamilyHLogEvenWhenTableNameNamespaceSpecified() throws IOException {
-    when(log.append(any(),
-            any(), argThat(bulkLogWalEditType(WALEdit.BULK_LOAD)),
-            anyBoolean())).thenAnswer(new Answer() {
+    when(log.appendMarker(any(),
+            any(), argThat(bulkLogWalEditType(WALEdit.BULK_LOAD)))).thenAnswer(new Answer() {
               @Override
               public Object answer(InvocationOnMock invocation) {
                 WALKeyImpl walKey = invocation.getArgument(1);
@@ -207,6 +205,13 @@ public class TestBulkLoad {
       null);
   }
 
+  // after HBASE-24021 will throw DoNotRetryIOException, not MultipleIOException
+  @Test(expected = DoNotRetryIOException.class)
+  public void shouldCrashIfBulkLoadMultiFamiliesNotInTable() throws IOException {
+    testRegionWithFamilies(family1).bulkLoadHFiles(withFamilyPathsFor(family1, family2, family3),
+      false, null);
+  }
+
   @Test(expected = DoNotRetryIOException.class)
   public void bulkHLogShouldThrowErrorWhenFamilySpecifiedAndHFileExistsButNotInTableDescriptor()
       throws IOException {
@@ -224,6 +229,15 @@ public class TestBulkLoad {
   public void shouldThrowErrorIfHFileDoesNotExist() throws IOException {
     List<Pair<byte[], String>> list = asList(withMissingHFileForFamily(family1));
     testRegionWithFamilies(family1).bulkLoadHFiles(list, false, null);
+  }
+
+  // after HBASE-24021 will throw FileNotFoundException, not MultipleIOException
+  @Test(expected = FileNotFoundException.class)
+  public void shouldThrowErrorIfMultiHFileDoesNotExist() throws IOException {
+    List<Pair<byte[], String>> list = new ArrayList<>();
+    list.addAll(asList(withMissingHFileForFamily(family1)));
+    list.addAll(asList(withMissingHFileForFamily(family2)));
+    testRegionWithFamilies(family1, family2).bulkLoadHFiles(list, false, null);
   }
 
   private Pair<byte[], String> withMissingHFileForFamily(byte[] family) {
@@ -246,16 +260,19 @@ public class TestBulkLoad {
                                                               byte[]... families)
   throws IOException {
     HRegionInfo hRegionInfo = new HRegionInfo(tableName);
-    HTableDescriptor hTableDescriptor = new HTableDescriptor(tableName);
+    TableDescriptorBuilder.ModifyableTableDescriptor tableDescriptor =
+      new TableDescriptorBuilder.ModifyableTableDescriptor(tableName);
+
     for (byte[] family : families) {
-      hTableDescriptor.addFamily(new HColumnDescriptor(family));
+      tableDescriptor.setColumnFamily(
+        new ColumnFamilyDescriptorBuilder.ModifyableColumnFamilyDescriptor(family));
     }
     ChunkCreator.initialize(MemStoreLABImpl.CHUNK_SIZE_DEFAULT, false, 0, 0, 0, null);
     // TODO We need a way to do this without creating files
     return HRegion.createHRegion(hRegionInfo,
         new Path(testFolder.newFolder().toURI()),
         conf,
-        hTableDescriptor,
+        tableDescriptor,
         log);
 
   }
@@ -284,15 +301,17 @@ public class TestBulkLoad {
     FSDataOutputStream out = new FSDataOutputStream(new FileOutputStream(hFileLocation), null);
     try {
       hFileFactory.withOutputStream(out);
-      hFileFactory.withFileContext(new HFileContext());
+      hFileFactory.withFileContext(new HFileContextBuilder().build());
       HFile.Writer writer = hFileFactory.create();
       try {
-        writer.append(new KeyValue(CellUtil.createCell(randomBytes,
-            family,
-            randomBytes,
-            0L,
-            KeyValue.Type.Put.getCode(),
-            randomBytes)));
+        writer.append(new KeyValue(ExtendedCellBuilderFactory.create(CellBuilderType.DEEP_COPY)
+          .setRow(randomBytes)
+          .setFamily(family)
+          .setQualifier(randomBytes)
+          .setTimestamp(0L)
+          .setType(KeyValue.Type.Put.getCode())
+          .setValue(randomBytes)
+          .build()));
       } finally {
         writer.close();
       }

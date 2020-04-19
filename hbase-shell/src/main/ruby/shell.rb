@@ -333,10 +333,13 @@ Shell.load_command_group(
     normalizer_switch
     normalizer_enabled
     is_in_maintenance_mode
+    clear_slowlog_responses
     close_region
     compact
     compaction_switch
     flush
+    get_slowlog_responses
+    get_largelog_responses
     major_compact
     move
     split
@@ -354,6 +357,8 @@ Shell.load_command_group(
     compact_rs
     compaction_state
     trace
+    snapshot_cleanup_switch
+    snapshot_cleanup_enabled
     splitormerge_switch
     splitormerge_enabled
     clear_compaction_queues
@@ -362,6 +367,7 @@ Shell.load_command_group(
     clear_block_cache
     stop_master
     stop_regionserver
+    regioninfo
     rit
     list_decommissioned_regionservers
     decommission_regionservers

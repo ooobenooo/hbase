@@ -115,7 +115,11 @@ module Hbase
 
     # Requests to compact all regions on the regionserver
     def compact_regionserver(servername, major = false)
-      @admin.compactRegionServer(ServerName.valueOf(servername), major)
+      if major
+        @admin.majorCompactRegionServer(ServerName.valueOf(servername))
+      else
+        @admin.compactRegionServer(ServerName.valueOf(servername))
+      end
     end
 
     #----------------------------------------------------------------------------------------------
@@ -327,15 +331,15 @@ module Hbase
     def enable_all(regex)
       pattern = Pattern.compile(regex.to_s)
       failed = java.util.ArrayList.new
-      admin.listTableNames(pattern).each do |table_name|
+      @admin.listTableNames(pattern).each do |table_name|
         begin
-          admin.enableTable(table_name)
+          @admin.enableTable(table_name)
         rescue java.io.IOException => e
           puts "table:#{table_name}, error:#{e.toString}"
           failed.add(table_name)
         end
       end
-      @failed
+      failed
     end
 
     #----------------------------------------------------------------------------------------------
@@ -351,15 +355,15 @@ module Hbase
     def disable_all(regex)
       pattern = Pattern.compile(regex.to_s)
       failed = java.util.ArrayList.new
-      admin.listTableNames(pattern).each do |table_name|
+      @admin.listTableNames(pattern).each do |table_name|
         begin
-          admin.disableTable(table_name)
+          @admin.disableTable(table_name)
         rescue java.io.IOException => e
           puts "table:#{table_name}, error:#{e.toString}"
           failed.add(table_name)
         end
       end
-      @failed
+      failed
     end
 
     #---------------------------------------------------------------------------------------------
@@ -390,15 +394,15 @@ module Hbase
     def drop_all(regex)
       pattern = Pattern.compile(regex.to_s)
       failed = java.util.ArrayList.new
-      admin.listTableNames(pattern).each do |table_name|
+      @admin.listTableNames(pattern).each do |table_name|
         begin
-          admin.deleteTable(table_name)
+          @admin.deleteTable(table_name)
         rescue java.io.IOException => e
           puts puts "table:#{table_name}, error:#{e.toString}"
           failed.add(table_name)
         end
       end
-      @failed
+      failed
     end
 
     #----------------------------------------------------------------------------------------------
@@ -531,11 +535,29 @@ module Hbase
     end
 
     #----------------------------------------------------------------------------------------------
-    # Merge two regions
-    def merge_region(region_a_name, region_b_name, force)
-      @admin.mergeRegions(region_a_name.to_java_bytes,
-                          region_b_name.to_java_bytes,
-                          java.lang.Boolean.valueOf(force))
+    # Merge multiple regions
+    def merge_region(regions, force)
+      unless regions.is_a?(Array)
+        raise(ArgumentError, "Type of #{regions.inspect} is #{regions.class}, but expected Array")
+      end
+      region_array = Java::byte[][regions.length].new
+      i = 0
+      while i < regions.length
+        unless regions[i].is_a?(String)
+          raise(
+              ArgumentError,
+              "Type of #{regions[i].inspect} is #{regions[i].class}, but expected String"
+          )
+        end
+        region_array[i] = regions[i].to_java_bytes
+        i += 1
+      end
+      org.apache.hadoop.hbase.util.FutureUtils.get(
+          @admin.mergeRegionsAsync(
+              region_array,
+              java.lang.Boolean.valueOf(force)
+          )
+      )
     end
 
     #----------------------------------------------------------------------------------------------
@@ -556,87 +578,50 @@ module Hbase
     end
 
     #----------------------------------------------------------------------------------------------
+    # Enable/disable snapshot auto-cleanup based on TTL expiration
+    # Returns previous snapshot auto-cleanup switch setting.
+    def snapshot_cleanup_switch(enable_disable)
+      @admin.snapshotCleanupSwitch(
+        java.lang.Boolean.valueOf(enable_disable), java.lang.Boolean.valueOf(false)
+      )
+    end
+
+    #----------------------------------------------------------------------------------------------
+    # Query the current state of the snapshot auto-cleanup based on TTL
+    # Returns the snapshot auto-cleanup state (true if enabled)
+    def snapshot_cleanup_enabled?
+      @admin.isSnapshotCleanupEnabled
+    end
+
+    #----------------------------------------------------------------------------------------------
     # Truncates table (deletes all records by recreating the table)
     def truncate(table_name_str)
       puts "Truncating '#{table_name_str}' table (it may take a while):"
       table_name = TableName.valueOf(table_name_str)
-      table_description = @admin.getDescriptor(table_name)
-      raise ArgumentError, "Table #{table_name_str} is not enabled. Enable it first." unless
-          enabled?(table_name_str)
-      puts 'Disabling table...'
-      @admin.disableTable(table_name)
 
-      begin
-        puts 'Truncating table...'
-        @admin.truncateTable(table_name, false)
-      rescue => e
-        # Handle the compatibility case, where the truncate method doesn't exists on the Master
-        raise e unless e.respond_to?(:cause) && !e.cause.nil?
-        rootCause = e.cause
-        if rootCause.is_a?(org.apache.hadoop.hbase.DoNotRetryIOException)
-          # Handle the compatibility case, where the truncate method doesn't exists on the Master
-          puts 'Dropping table...'
-          @admin.deleteTable(table_name)
-
-          puts 'Creating table...'
-          @admin.createTable(table_description)
-        else
-          raise e
-        end
+      if enabled?(table_name_str)
+        puts 'Disabling table...'
+        disable(table_name_str)
       end
+
+      puts 'Truncating table...'
+      @admin.truncateTable(table_name, false)
     end
 
     #----------------------------------------------------------------------------------------------
-    # Truncates table while maintaing region boundaries (deletes all records by recreating the table)
-    def truncate_preserve(table_name_str, conf = @conf)
+    # Truncates table while maintaining region boundaries
+    # (deletes all records by recreating the table)
+    def truncate_preserve(table_name_str)
       puts "Truncating '#{table_name_str}' table (it may take a while):"
       table_name = TableName.valueOf(table_name_str)
-      locator = @connection.getRegionLocator(table_name)
-      begin
-        splits = locator.getAllRegionLocations
-                        .map { |i| Bytes.toStringBinary(i.getRegion.getStartKey) }
-                        .delete_if { |k| k == '' }.to_java :String
-        splits = org.apache.hadoop.hbase.util.Bytes.toBinaryByteArrays(splits)
-      ensure
-        locator.close
+
+      if enabled?(table_name_str)
+        puts 'Disabling table...'
+        disable(table_name_str)
       end
 
-      table_description = @admin.getDescriptor(table_name)
-      puts 'Disabling table...'
-      disable(table_name_str)
-
-      begin
-        puts 'Truncating table...'
-        # just for test
-        unless conf.getBoolean('hbase.client.truncatetable.support', true)
-          raise UnsupportedMethodException, 'truncateTable'
-        end
-        @admin.truncateTable(table_name, true)
-      rescue => e
-        # Handle the compatibility case, where the truncate method doesn't exists on the Master
-        raise e unless e.respond_to?(:cause) && !e.cause.nil?
-        rootCause = e.cause
-        if rootCause.is_a?(org.apache.hadoop.hbase.DoNotRetryIOException)
-          # Handle the compatibility case, where the truncate method doesn't exists on the Master
-          puts 'Dropping table...'
-          @admin.deleteTable(table_name)
-
-          puts 'Creating table with region boundaries...'
-          @admin.createTable(table_description, splits)
-        else
-          raise e
-        end
-      end
-    end
-
-    class UnsupportedMethodException < StandardError
-      def initialize(name)
-        @method_name = name
-      end
-
-      def cause
-        org.apache.hadoop.hbase.DoNotRetryIOException.new("#{@method_name} is not support")
-      end
+      puts 'Truncating table...'
+      @admin.truncateTable(table_name, true)
     end
 
     #----------------------------------------------------------------------------------------------
@@ -648,16 +633,21 @@ module Hbase
       # Table should exist
       raise(ArgumentError, "Can't find a table: #{table_name}") unless exists?(table_name)
 
-      status = Pair.new
       begin
-        status = @admin.getAlterStatus(org.apache.hadoop.hbase.TableName.valueOf(table_name))
-        if status.getSecond != 0
-          puts "#{status.getSecond - status.getFirst}/#{status.getSecond} regions updated."
+        cluster_metrics = @admin.getClusterMetrics
+        table_region_status = cluster_metrics
+                              .getTableRegionStatesCount
+                              .get(org.apache.hadoop.hbase.TableName.valueOf(table_name))
+        if table_region_status.getTotalRegions != 0
+          updated_regions = table_region_status.getTotalRegions -
+                            table_region_status.getRegionsInTransition -
+                            table_region_status.getClosedRegions
+          puts "#{updated_regions}/#{table_region_status.getTotalRegions} regions updated."
         else
           puts 'All regions updated.'
         end
         sleep 1
-      end while !status.nil? && status.getFirst != 0
+      end while !table_region_status.nil? && table_region_status.getRegionsInTransition != 0
       puts 'Done.'
     end
 
@@ -1479,6 +1469,105 @@ module Hbase
     end
 
     #----------------------------------------------------------------------------------------------
+    # Retrieve SlowLog Responses from RegionServers
+    def get_slowlog_responses(server_names, args)
+      unless server_names.is_a?(Array) || server_names.is_a?(String)
+        raise(ArgumentError,
+              "#{server_names.class} of #{server_names.inspect} is not of Array/String type")
+      end
+      if server_names == '*'
+        server_names = getServerNames([], true)
+      else
+        server_names_list = to_server_names(server_names)
+        server_names = getServerNames(server_names_list, false)
+      end
+      filter_params = get_filter_params(args)
+      filter_params.setType(org.apache.hadoop.hbase.client.LogQueryFilter::Type::SLOW_LOG)
+      slow_log_responses = @admin.getSlowLogResponses(java.util.HashSet.new(server_names),
+                                                      filter_params)
+      slow_log_responses_arr = []
+      for slow_log_response in slow_log_responses
+        slow_log_responses_arr << slow_log_response.toJsonPrettyPrint
+      end
+      puts 'Retrieved SlowLog Responses from RegionServers'
+      puts slow_log_responses_arr
+    end
+
+    def get_filter_params(args)
+      filter_params = org.apache.hadoop.hbase.client.LogQueryFilter.new
+      if args.key? 'REGION_NAME'
+        region_name = args['REGION_NAME']
+        filter_params.setRegionName(region_name)
+      end
+      if args.key? 'TABLE_NAME'
+        table_name = args['TABLE_NAME']
+        filter_params.setTableName(table_name)
+      end
+      if args.key? 'CLIENT_IP'
+        client_ip = args['CLIENT_IP']
+        filter_params.setClientAddress(client_ip)
+      end
+      if args.key? 'USER'
+        user = args['USER']
+        filter_params.setUserName(user)
+      end
+      if args.key? 'LIMIT'
+        limit = args['LIMIT']
+        filter_params.setLimit(limit)
+      end
+      filter_params
+    end
+
+    #----------------------------------------------------------------------------------------------
+    # Retrieve LargeLog Responses from RegionServers
+    def get_largelog_responses(server_names, args)
+      unless server_names.is_a?(Array) || server_names.is_a?(String)
+        raise(ArgumentError,
+              "#{server_names.class} of #{server_names.inspect} is not of Array/String type")
+      end
+      if server_names == '*'
+        server_names = getServerNames([], true)
+      else
+        server_names_list = to_server_names(server_names)
+        server_names = getServerNames(server_names_list, false)
+      end
+      filter_params = get_filter_params(args)
+      filter_params.setType(org.apache.hadoop.hbase.client.LogQueryFilter::Type::LARGE_LOG)
+      large_log_responses = @admin.getSlowLogResponses(java.util.HashSet.new(server_names),
+                                                       filter_params)
+      large_log_responses_arr = []
+      for large_log_response in large_log_responses
+        large_log_responses_arr << large_log_response.toJsonPrettyPrint
+      end
+      puts 'Retrieved LargeLog Responses from RegionServers'
+      puts large_log_responses_arr
+    end
+
+    #----------------------------------------------------------------------------------------------
+    # Clears SlowLog Responses from RegionServers
+    def clear_slowlog_responses(server_names)
+      unless server_names.nil? || server_names.is_a?(Array) || server_names.is_a?(String)
+        raise(ArgumentError,
+              "#{server_names.class} of #{server_names.inspect} is not of correct type")
+      end
+      if server_names.nil?
+        server_names = getServerNames([], true)
+      else
+        server_names_list = to_server_names(server_names)
+        server_names = getServerNames(server_names_list, false)
+      end
+      clear_log_responses = @admin.clearSlowLogResponses(java.util.HashSet.new(server_names))
+      clear_log_success_count = 0
+      clear_log_responses.each do |response|
+        if response
+          clear_log_success_count += 1
+        end
+      end
+      puts 'Cleared Slowlog responses from ' \
+           "#{clear_log_success_count}/#{clear_log_responses.size} RegionServers"
+    end
+
+    #----------------------------------------------------------------------------------------------
     # Decommission a list of region servers, optionally offload corresponding regions
     def decommission_regionservers(host_or_servers, should_offload)
       # Fail if host_or_servers is neither a string nor an array
@@ -1551,6 +1640,16 @@ module Hbase
     # Stop the given RegionServer
     def stop_regionserver(hostport)
       @admin.stopRegionServer(hostport)
+    end
+
+    #----------------------------------------------------------------------------------------------
+    # Get list of server names
+    def to_server_names(server_names)
+      if server_names.is_a?(Array)
+        server_names
+      else
+        java.util.Arrays.asList(server_names)
+      end
     end
   end
   # rubocop:enable Metrics/ClassLength

@@ -29,29 +29,29 @@ import java.util.NavigableSet;
 import java.util.Random;
 import java.util.TreeSet;
 import java.util.concurrent.CountDownLatch;
-
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.CellComparator;
-import org.apache.hadoop.hbase.CellComparatorImpl;
 import org.apache.hadoop.hbase.HBaseClassTestRule;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
-import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HRegionInfo;
-import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.KeepDeletedCells;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.client.ColumnFamilyDescriptorBuilder;
+import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Scan;
+import org.apache.hadoop.hbase.client.TableDescriptorBuilder;
 import org.apache.hadoop.hbase.io.hfile.CacheConfig;
 import org.apache.hadoop.hbase.io.hfile.HFileContext;
 import org.apache.hadoop.hbase.io.hfile.HFileContextBuilder;
 import org.apache.hadoop.hbase.io.hfile.RandomKeyValueUtil;
-import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.testclassification.RegionServerTests;
+import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.junit.BeforeClass;
 import org.junit.ClassRule;
@@ -66,7 +66,7 @@ import org.slf4j.LoggerFactory;
  * {@link StoreScanner#updateReaders(List, List)} works perfectly ensuring
  * that there are no references on the existing Storescanner readers.
  */
-@Category({ RegionServerTests.class, MediumTests.class })
+@Category({ RegionServerTests.class, SmallTests.class })
 public class TestStoreScannerClosure {
 
   @ClassRule
@@ -106,11 +106,69 @@ public class TestStoreScannerClosure {
     cacheConf = new CacheConfig(CONF);
     fs = TEST_UTIL.getTestFileSystem();
     TableName tableName = TableName.valueOf("test");
-    HTableDescriptor htd = new HTableDescriptor(tableName);
-    htd.addFamily(new HColumnDescriptor(fam));
+    TableDescriptorBuilder.ModifyableTableDescriptor tableDescriptor =
+      new TableDescriptorBuilder.ModifyableTableDescriptor(tableName);
+    tableDescriptor.setColumnFamily(
+      new ColumnFamilyDescriptorBuilder.ModifyableColumnFamilyDescriptor(fam));
     HRegionInfo info = new HRegionInfo(tableName, null, null, false);
     Path path = TEST_UTIL.getDataTestDir("test");
-    region = HBaseTestingUtility.createRegionAndWAL(info, path, TEST_UTIL.getConfiguration(), htd);
+    region = HBaseTestingUtility.createRegionAndWAL(info, path,
+      TEST_UTIL.getConfiguration(), tableDescriptor);
+  }
+
+  @Test
+  public void testScannerCloseAndUpdateReadersWithMemstoreScanner() throws Exception {
+    Put p = new Put(Bytes.toBytes("row"));
+    p.addColumn(fam, Bytes.toBytes("q1"), Bytes.toBytes("val"));
+    region.put(p);
+    // create the store scanner here.
+    // for easiness, use Long.MAX_VALUE as read pt
+    try (ExtendedStoreScanner scan = new ExtendedStoreScanner(region.getStore(fam), scanInfo,
+        new Scan(), getCols("q1"), Long.MAX_VALUE)) {
+      p = new Put(Bytes.toBytes("row1"));
+      p.addColumn(fam, Bytes.toBytes("q1"), Bytes.toBytes("val"));
+      region.put(p);
+      HStore store = region.getStore(fam);
+      ReentrantReadWriteLock lock = store.lock;
+      // use the lock to manually get a new memstore scanner. this is what
+      // HStore#notifyChangedReadersObservers does under the lock.(lock is not needed here
+      //since it is just a testcase).
+      lock.readLock().lock();
+      final List<KeyValueScanner> memScanners = store.memstore.getScanners(Long.MAX_VALUE);
+      lock.readLock().unlock();
+      Thread closeThread = new Thread() {
+        public void run() {
+          // close should be completed
+          scan.close(false, true);
+        }
+      };
+      closeThread.start();
+      Thread updateThread = new Thread() {
+        public void run() {
+          try {
+            // use the updated memstoreScanners and pass it to updateReaders
+            scan.updateReaders(true, Collections.emptyList(), memScanners);
+          } catch (IOException e) {
+            e.printStackTrace();
+          }
+        }
+      };
+      updateThread.start();
+      // wait for close and updateThread to complete
+      closeThread.join();
+      updateThread.join();
+      MemStoreLAB memStoreLAB;
+      for (KeyValueScanner scanner : memScanners) {
+        if (scanner instanceof SegmentScanner) {
+          memStoreLAB = ((SegmentScanner) scanner).segment.getMemStoreLAB();
+          if (memStoreLAB != null) {
+            // There should be no unpooled chunks
+            int openScannerCount = ((MemStoreLABImpl) memStoreLAB).getOpenScannerCount();
+            assertTrue("The memstore should not have unpooled chunks", openScannerCount == 0);
+          }
+        }
+      }
+    }
   }
 
   @Test
@@ -127,7 +185,7 @@ public class TestStoreScannerClosure {
     Path storeFileParentDir = new Path(TEST_UTIL.getDataTestDir(), "TestHFile");
     HFileContext meta = new HFileContextBuilder().withBlockSize(64 * 1024).build();
     StoreFileWriter sfw = new StoreFileWriter.Builder(CONF, fs).withOutputDir(storeFileParentDir)
-        .withComparator(CellComparatorImpl.COMPARATOR).withFileContext(meta).build();
+        .withFileContext(meta).build();
 
     final int rowLen = 32;
     Random RNG = new Random();

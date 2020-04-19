@@ -50,12 +50,13 @@ org.apache.hadoop.hbase.master.DeadServer;
 org.apache.hadoop.hbase.master.HMaster;
 org.apache.hadoop.hbase.master.RegionState;
 org.apache.hadoop.hbase.master.ServerManager;
-org.apache.hadoop.hbase.protobuf.ProtobufUtil;
 org.apache.hadoop.hbase.quotas.QuotaUtil;
+org.apache.hadoop.hbase.rsgroup.RSGroupInfoManager;
+org.apache.hadoop.hbase.rsgroup.RSGroupUtil;
 org.apache.hadoop.hbase.security.access.PermissionStorage;
 org.apache.hadoop.hbase.security.visibility.VisibilityConstants;
 org.apache.hadoop.hbase.shaded.protobuf.generated.SnapshotProtos.SnapshotDescription;
-org.apache.hadoop.hbase.tool.Canary;
+org.apache.hadoop.hbase.tool.CanaryTool;
 org.apache.hadoop.hbase.util.Bytes;
 org.apache.hadoop.hbase.util.FSUtils;
 org.apache.hadoop.hbase.util.JvmVersion;
@@ -224,7 +225,8 @@ AssignmentManager assignmentManager = master.getAssignmentManager();
           <& AssignmentManagerStatusTmpl; assignmentManager=master.getAssignmentManager()&>
         </%if>
         <%if !master.isInMaintenanceMode() %>
-          <%if master.getMasterCoprocessorHost().findCoprocessor("RSGroupAdminEndpoint") != null %>
+          <%if RSGroupUtil.isRSGroupEnabled(master.getConfiguration()) &&
+            serverManager.getOnlineServersList().size() > 0 %>
             <section>
               <h2><a name="rsgroup">RSGroup</a></h2>
               <& RSGroupListTmpl; master= master; serverManager= serverManager&>
@@ -327,8 +329,8 @@ AssignmentManager assignmentManager = master.getAssignmentManager();
                 </tr>
                 <tr>
                     <td>ZooKeeper Client Version</td>
-                    <td><% org.apache.zookeeper.Version.getVersion() %>, revision=<% org.apache.zookeeper.Version.getRevision() %></td>
-                    <td>ZooKeeper client version and revision</td>
+                    <td><% org.apache.zookeeper.Version.getVersion() %>, revision=<% org.apache.zookeeper.Version.getRevisionHash() %></td>
+                    <td>ZooKeeper client version and revision hash</td>
                 </tr>
                 <tr>
                     <td>ZooKeeper Client Compiled</td>
@@ -406,6 +408,7 @@ AssignmentManager assignmentManager = master.getAssignmentManager();
     <script src="/static/js/jquery.tablesorter.min.js" type="text/javascript"></script>
     <script src="/static/js/bootstrap.min.js" type="text/javascript"></script>
     <script src="/static/js/tab.js" type="text/javascript"></script>
+    <script src="/static/js/jqSpager.js" type="text/javascript"></script>
     <script>
     $(document).ready(function()
         {
@@ -482,6 +485,34 @@ AssignmentManager assignmentManager = master.getAssignmentManager();
             });
 
             $("#userTables").tablesorter();
+
+            function showRitPages() {
+                if (!$("#rit_page_num")) {
+                  return;
+                }
+                var ritTotalNum = parseInt($("#rit_page_num").val());
+                if (!ritTotalNum || ritTotalNum < 1) {
+                  return;
+                }
+
+                 $("#rit_pagination").sPage({
+                      page:1,
+                      total:ritTotalNum,
+                      pageSize:5,
+                      noData: false,
+                      showPN:true,
+                      prevPage:"prev",
+                      nextPage:"next",
+                      fastForward: 5,
+                      backFun:function(page){
+                          $("div[id^='tab_rits']").removeClass('active');
+                          $("#tab_rits"+page).addClass('active');
+                      }
+                  });
+
+            }
+            showRitPages();
+
         }
     );
     </script>
@@ -513,7 +544,7 @@ AssignmentManager assignmentManager = master.getAssignmentManager();
     <%java>String description = null;
         if (tableName.equals(TableName.META_TABLE_NAME)){
             description = "The hbase:meta table holds references to all User Table regions.";
-        } else if (tableName.equals(Canary.DEFAULT_WRITE_TABLE_NAME)){
+        } else if (tableName.equals(CanaryTool.DEFAULT_WRITE_TABLE_NAME)){
             description = "The hbase:canary table is used to sniff the write availbility of"
               + " each regionserver.";
         } else if (tableName.equals(PermissionStorage.ACL_TABLE_NAME)){

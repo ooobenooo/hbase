@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -25,7 +25,6 @@ import static org.junit.Assert.fail;
 import java.io.IOException;
 import java.util.regex.Pattern;
 import org.apache.hadoop.hbase.HBaseClassTestRule;
-import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.exceptions.DeserializationException;
 import org.apache.hadoop.hbase.testclassification.MiscTests;
@@ -279,11 +278,12 @@ public class TestTableDescriptorBuilder {
   @Test(expected=IllegalArgumentException.class)
   public void testModifyInexistentFamily() {
     byte[] familyName = Bytes.toBytes("cf");
-    HColumnDescriptor hcd = new HColumnDescriptor(familyName);
+    ColumnFamilyDescriptorBuilder.ModifyableColumnFamilyDescriptor familyDescriptor =
+      new ColumnFamilyDescriptorBuilder.ModifyableColumnFamilyDescriptor(familyName);
     TableDescriptor htd = TableDescriptorBuilder
-            .newBuilder(TableName.valueOf(name.getMethodName()))
-            .modifyColumnFamily(hcd)
-            .build();
+      .newBuilder(TableName.valueOf(name.getMethodName()))
+      .modifyColumnFamily(familyDescriptor)
+      .build();
   }
 
   @Test(expected=IllegalArgumentException.class)
@@ -309,5 +309,22 @@ public class TestTableDescriptorBuilder {
             .setPriority(42)
             .build();
     assertEquals(42, htd.getPriority());
+  }
+
+  @Test
+  public void testStringCustomizedValues() {
+    byte[] familyName = Bytes.toBytes("cf");
+    ColumnFamilyDescriptor hcd = ColumnFamilyDescriptorBuilder.newBuilder(familyName)
+            .setBlocksize(1000)
+            .build();
+    TableDescriptor htd = TableDescriptorBuilder.newBuilder(TableName.valueOf(name.getMethodName()))
+            .setColumnFamily(hcd)
+            .setDurability(Durability.ASYNC_WAL)
+            .build();
+
+    assertEquals(
+      "'testStringCustomizedValues', " +
+        "{TABLE_ATTRIBUTES => {DURABILITY => 'ASYNC_WAL'}}, {NAME => 'cf', BLOCKSIZE => '1000'}",
+      htd.toStringCustomizedValues());
   }
 }

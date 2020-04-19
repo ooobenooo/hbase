@@ -454,6 +454,45 @@ struct TNamespaceDescriptor {
 2: optional map<string, string> configuration
 }
 
+enum TLogType {
+  SLOW_LOG = 1,
+  LARGE_LOG = 2
+}
+
+/**
+ * Thrift wrapper around
+ * org.apache.hadoop.hbase.client.LogQueryFilter
+ */
+struct TLogQueryFilter {
+  1: optional string regionName
+  2: optional string clientAddress
+  3: optional string tableName
+  4: optional string userName
+  5: optional i32 limit = 10
+  6: optional TLogType logType = 1
+}
+
+
+/**
+ * Thrift wrapper around
+ * org.apache.hadoop.hbase.client.OnlineLogRecordrd
+ */
+struct TOnlineLogRecord {
+  1: required i64 startTime
+  2: required i32 processingTime
+  3: required i32 queueTime
+  4: required i64 responseSize
+  5: required string clientAddress
+  6: required string serverClass
+  7: required string methodName
+  8: required string callDetails
+  9: required string param
+  10: required string userName
+  11: required i32 multiGetsCount
+  12: required i32 multiMutationsCount
+  13: required i32 multiServiceCalls
+  14: optional string regionName
+}
 
 //
 // Exceptions
@@ -474,6 +513,14 @@ exception TIOError {
  */
 exception TIllegalArgument {
   1: optional string message
+}
+
+/**
+ * Specify type of thrift server: thrift and thrift2
+ */
+enum TThriftServerType {
+  ONE = 1,
+  TWO = 2
 }
 
 service THBaseService {
@@ -1038,4 +1085,44 @@ service THBaseService {
   **/
   list<string> listNamespaces(
   ) throws (1: TIOError io)
+
+  /**
+   * Get the type of this thrift server.
+   *
+   * @return the type of this thrift server
+   */
+  TThriftServerType getThriftServerType()
+
+  /**
+   * Returns the cluster ID for this cluster.
+   */
+  string getClusterId()
+
+  /**
+   * Retrieves online slow RPC logs from the provided list of
+   * RegionServers
+   *
+   * @return online slowlog response list
+   * @throws TIOError if a remote or network exception occurs
+   */
+  list<TOnlineLogRecord> getSlowLogResponses(
+   /** @param serverNames Server names to get slowlog responses from */
+    1: set<TServerName> serverNames
+   /** @param logQueryFilter filter to be used if provided */
+    2: TLogQueryFilter logQueryFilter
+  ) throws (1: TIOError io)
+
+  /**
+   * Clears online slow/large RPC logs from the provided list of
+   * RegionServers
+   *
+   * @return List of booleans representing if online slowlog response buffer is cleaned
+   *   from each RegionServer
+   * @throws TIOError if a remote or network exception occurs
+   */
+  list<bool> clearSlowLogResponses(
+    /** @param serverNames Set of Server names to clean slowlog responses from */
+    1: set<TServerName> serverNames
+  ) throws (1: TIOError io)
+
 }

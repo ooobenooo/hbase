@@ -110,7 +110,7 @@ public abstract class ModifyRegionUtils {
     if (newRegions == null) return null;
     int regionNumber = newRegions.length;
     ThreadPoolExecutor exec = getRegionOpenAndInitThreadPool(conf,
-        "RegionOpenAndInitThread-" + tableDescriptor.getTableName(), regionNumber);
+        "RegionOpenAndInit-" + tableDescriptor.getTableName(), regionNumber);
     try {
       return createRegions(exec, conf, rootDir, tableDescriptor, newRegions, task);
     } finally {
@@ -218,9 +218,7 @@ public abstract class ModifyRegionUtils {
     } catch (InterruptedException e) {
       throw new InterruptedIOException(e.getMessage());
     } catch (ExecutionException e) {
-      IOException ex = new IOException();
-      ex.initCause(e.getCause());
-      throw ex;
+      throw new IOException(e.getCause());
     }
   }
 
@@ -232,8 +230,8 @@ public abstract class ModifyRegionUtils {
       final String threadNamePrefix, int regionNumber) {
     int maxThreads = Math.min(regionNumber, conf.getInt(
         "hbase.hregion.open.and.init.threads.max", 16));
-    ThreadPoolExecutor regionOpenAndInitThreadPool = Threads
-    .getBoundedCachedThreadPool(maxThreads, 30L, TimeUnit.SECONDS,
+    ThreadPoolExecutor regionOpenAndInitThreadPool = Threads.
+      getBoundedCachedThreadPool(maxThreads, 30L, TimeUnit.SECONDS,
         Threads.newDaemonThreadFactory(threadNamePrefix));
     return regionOpenAndInitThreadPool;
   }

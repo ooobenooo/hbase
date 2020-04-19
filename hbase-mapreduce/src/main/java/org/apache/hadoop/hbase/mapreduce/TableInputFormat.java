@@ -148,7 +148,7 @@ implements Configurable {
     Scan scan = new Scan();
 
     if (conf.get(SCAN_ROW_START) != null) {
-      scan.setStartRow(Bytes.toBytesBinary(conf.get(SCAN_ROW_START)));
+      scan.withStartRow(Bytes.toBytesBinary(conf.get(SCAN_ROW_START)));
     }
 
     if (conf.get(SCAN_ROW_STOP) != null) {
@@ -174,7 +174,7 @@ implements Configurable {
     }
 
     if (conf.get(SCAN_MAXVERSIONS) != null) {
-      scan.setMaxVersions(Integer.parseInt(conf.get(SCAN_MAXVERSIONS)));
+      scan.readVersions(Integer.parseInt(conf.get(SCAN_MAXVERSIONS)));
     }
 
     if (conf.get(SCAN_CACHEDROWS) != null) {

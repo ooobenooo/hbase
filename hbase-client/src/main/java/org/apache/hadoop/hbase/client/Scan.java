@@ -59,8 +59,7 @@ import org.slf4j.LoggerFactory;
  * To only retrieve columns with a specific timestamp, call {@link #setTimestamp(long) setTimestamp}
  * .
  * <p>
- * To limit the number of versions of each column to be returned, call {@link #setMaxVersions(int)
- * setMaxVersions}.
+ * To limit the number of versions of each column to be returned, call {@link #readVersions(int)}.
  * <p>
  * To limit the maximum number of values returned for each call to next(), call
  * {@link #setBatch(int) setBatch}.
@@ -179,46 +178,6 @@ public class Scan extends Query {
    * Create a Scan operation across all rows.
    */
   public Scan() {}
-
-  /**
-   * @deprecated since 2.0.0 and will be removed in 3.0.0. Use
-   *   {@code new Scan().withStartRow(startRow).setFilter(filter)} instead.
-   * @see <a href="https://issues.apache.org/jira/browse/HBASE-17320">HBASE-17320</a>
-   */
-  @Deprecated
-  public Scan(byte[] startRow, Filter filter) {
-    this(startRow);
-    this.filter = filter;
-  }
-
-  /**
-   * Create a Scan operation starting at the specified row.
-   * <p>
-   * If the specified row does not exist, the Scanner will start from the next closest row after the
-   * specified row.
-   * @param startRow row to start scanner at or after
-   * @deprecated since 2.0.0 and will be removed in 3.0.0. Use
-   *   {@code new Scan().withStartRow(startRow)} instead.
-   * @see <a href="https://issues.apache.org/jira/browse/HBASE-17320">HBASE-17320</a>
-   */
-  @Deprecated
-  public Scan(byte[] startRow) {
-    setStartRow(startRow);
-  }
-
-  /**
-   * Create a Scan operation for the range of rows specified.
-   * @param startRow row to start scanner at or after (inclusive)
-   * @param stopRow row to stop scanner before (exclusive)
-   * @deprecated since 2.0.0 and will be removed in 3.0.0. Use
-   *   {@code new Scan().withStartRow(startRow).withStopRow(stopRow)} instead.
-   * @see <a href="https://issues.apache.org/jira/browse/HBASE-17320">HBASE-17320</a>
-   */
-  @Deprecated
-  public Scan(byte[] startRow, byte[] stopRow) {
-    setStartRow(startRow);
-    setStopRow(stopRow);
-  }
 
   /**
    * Creates a new instance of this class while copying all values.
@@ -352,8 +311,8 @@ public class Scan extends Query {
    * returned, up the number of versions beyond the default.
    * @param minStamp minimum timestamp value, inclusive
    * @param maxStamp maximum timestamp value, exclusive
-   * @see #setMaxVersions()
-   * @see #setMaxVersions(int)
+   * @see #readAllVersions()
+   * @see #readVersions(int)
    * @return this
    */
   public Scan setTimeRange(long minStamp, long maxStamp) throws IOException {
@@ -367,8 +326,8 @@ public class Scan extends Query {
    * and you want all versions returned, up the number of versions beyond the
    * defaut.
    * @param timestamp version timestamp
-   * @see #setMaxVersions()
-   * @see #setMaxVersions(int)
+   * @see #readAllVersions()
+   * @see #readVersions(int)
    * @return this
    * @deprecated As of release 2.0.0, this will be removed in HBase 3.0.0.
    *             Use {@link #setTimestamp(long)} instead
@@ -385,8 +344,8 @@ public class Scan extends Query {
    * and you want all versions returned, up the number of versions beyond the
    * defaut.
    * @param timestamp version timestamp
-   * @see #setMaxVersions()
-   * @see #setMaxVersions(int)
+   * @see #readAllVersions()
+   * @see #readVersions(int)
    * @return this
    */
   public Scan setTimestamp(long timestamp) {
@@ -403,31 +362,6 @@ public class Scan extends Query {
 
   @Override public Scan setColumnFamilyTimeRange(byte[] cf, long minStamp, long maxStamp) {
     return (Scan) super.setColumnFamilyTimeRange(cf, minStamp, maxStamp);
-  }
-
-  /**
-   * Set the start row of the scan.
-   * <p>
-   * If the specified row does not exist, the Scanner will start from the next closest row after the
-   * specified row.
-   * @param startRow row to start scanner at or after
-   * @return this
-   * @throws IllegalArgumentException if startRow does not meet criteria for a row key (when length
-   *           exceeds {@link HConstants#MAX_ROW_LENGTH})
-   * @deprecated since 2.0.0 and will be removed in 3.0.0. Use {@link #withStartRow(byte[])}
-   *   instead. This method may change the inclusive of the stop row to keep compatible with the old
-   *   behavior.
-   * @see #withStartRow(byte[])
-   * @see <a href="https://issues.apache.org/jira/browse/HBASE-17320">HBASE-17320</a>
-   */
-  @Deprecated
-  public Scan setStartRow(byte[] startRow) {
-    withStartRow(startRow);
-    if (ClientUtil.areScanStartRowAndStopRowEqual(this.startRow, this.stopRow)) {
-      // for keeping the old behavior that a scan with the same start and stop row is a get scan.
-      this.includeStopRow = true;
-    }
-    return this;
   }
 
   /**
@@ -537,47 +471,20 @@ public class Scan extends Query {
    * <p>This is a utility method that converts the desired rowPrefix into the appropriate values
    * for the startRow and stopRow to achieve the desired result.</p>
    * <p>This can safely be used in combination with setFilter.</p>
-   * <p><b>NOTE: Doing a {@link #setStartRow(byte[])} and/or {@link #setStopRow(byte[])}
+   * <p><b>NOTE: Doing a {@link #withStartRow(byte[])} and/or {@link #setStopRow(byte[])}
    * after this method will yield undefined results.</b></p>
    * @param rowPrefix the prefix all rows must start with. (Set <i>null</i> to remove the filter.)
    * @return this
    */
   public Scan setRowPrefixFilter(byte[] rowPrefix) {
     if (rowPrefix == null) {
-      setStartRow(HConstants.EMPTY_START_ROW);
+      withStartRow(HConstants.EMPTY_START_ROW);
       setStopRow(HConstants.EMPTY_END_ROW);
     } else {
-      this.setStartRow(rowPrefix);
+      this.withStartRow(rowPrefix);
       this.setStopRow(ClientUtil.calculateTheClosestNextRowKeyForPrefix(rowPrefix));
     }
     return this;
-  }
-
-  /**
-   * Get all available versions.
-   * @return this
-   * @deprecated since 2.0.0 and will be removed in 3.0.0. It is easy to misunderstand with column
-   *   family's max versions, so use {@link #readAllVersions()} instead.
-   * @see #readAllVersions()
-   * @see <a href="https://issues.apache.org/jira/browse/HBASE-17125">HBASE-17125</a>
-   */
-  @Deprecated
-  public Scan setMaxVersions() {
-    return readAllVersions();
-  }
-
-  /**
-   * Get up to the specified number of versions of each column.
-   * @param maxVersions maximum versions for each column
-   * @return this
-   * @deprecated since 2.0.0 and will be removed in 3.0.0. It is easy to misunderstand with column
-   *   family's max versions, so use {@link #readVersions(int)} instead.
-   * @see #readVersions(int)
-   * @see <a href="https://issues.apache.org/jira/browse/HBASE-17125">HBASE-17125</a>
-   */
-  @Deprecated
-  public Scan setMaxVersions(int maxVersions) {
-    return readVersions(maxVersions);
   }
 
   /**

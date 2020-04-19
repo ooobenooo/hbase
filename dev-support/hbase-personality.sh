@@ -45,6 +45,23 @@ if ! declare -f "yetus_info" >/dev/null; then
 
 fi
 
+# work around yetus overwriting JAVA_HOME from our docker image
+function docker_do_env_adds
+{
+  declare k
+
+  for k in "${DOCKER_EXTRAENVS[@]}"; do
+    if [[ "JAVA_HOME" == "${k}" ]]; then
+      if [ -n "${JAVA_HOME}" ]; then
+        DOCKER_EXTRAARGS+=("--env=JAVA_HOME=${JAVA_HOME}")
+      fi
+    else
+      DOCKER_EXTRAARGS+=("--env=${k}=${!k}")
+    fi
+  done
+}
+
+
 ## @description  Globals specific to this personality
 ## @audience     private
 ## @stability    evolving
@@ -62,13 +79,10 @@ function personality_globals
 
   # TODO use PATCH_BRANCH to select jdk versions to use.
 
-  # Override the maven options
-  MAVEN_OPTS="${MAVEN_OPTS:-"-Xmx3100M"}"
-
   # Yetus 0.7.0 enforces limits. Default proclimit is 1000.
   # Up it. See HBASE-19902 for how we arrived at this number.
   #shellcheck disable=SC2034
-  PROCLIMIT=10000
+  PROC_LIMIT=12500
 
   # Set docker container to run with 20g. Default is 4g in yetus.
   # See HBASE-19902 for how we arrived at 20g.
@@ -115,19 +129,24 @@ function personality_modules
   local repostatus=$1
   local testtype=$2
   local extra=""
+  local branch1jdk8=()
+  local jdk8module=""
   local MODULES=("${CHANGED_MODULES[@]}")
 
   yetus_info "Personality: ${repostatus} ${testtype}"
 
   clear_personality_queue
 
-  extra="-DHBasePatchProcess"
+  # At a few points, hbase modules can run build, test, etc. in parallel
+  # Let it happen. Means we'll use more CPU but should be for short bursts.
+  # https://cwiki.apache.org/confluence/display/MAVEN/Parallel+builds+in+Maven+3
+  extra="--threads=2 -DHBasePatchProcess"
   if [[ "${PATCH_BRANCH}" = branch-1* ]]; then
     extra="${extra} -Dhttps.protocols=TLSv1.2"
   fi
 
   if [[ -n "${HADOOP_PROFILE}" ]]; then
-    extra="${extra} -Dhadoop.profile=${HADOOP_PROFILE}"
+    extra="${extra} -Phadoop-${HADOOP_PROFILE}"
   fi
 
   # BUILDMODE value is 'full' when there is no patch to be tested, and we are running checks on
@@ -137,8 +156,8 @@ function personality_modules
   # If BUILDMODE is 'patch', for unit and compile testtypes, there is no need to run individual
   # modules if root is included. HBASE-18505
   if [[ "${BUILDMODE}" == "full" ]] || \
-     ( ( [[ "${testtype}" == unit ]] || [[ "${testtype}" == compile ]] || [[ "${testtype}" == checkstyle ]] ) && \
-     [[ "${MODULES[*]}" =~ \. ]] ); then
+     { { [[ "${testtype}" == unit ]] || [[ "${testtype}" == compile ]] || [[ "${testtype}" == checkstyle ]]; } && \
+     [[ "${MODULES[*]}" =~ \. ]]; }; then
     MODULES=(.)
   fi
 
@@ -153,17 +172,31 @@ function personality_modules
     return
   fi
 
-  if [[ ${testtype} == findbugs ]]; then
-    # Run findbugs on each module individually to diff pre-patch and post-patch results and
+  # This list should include any modules that require jdk8. Maven should be configured to only
+  # include them when a proper JDK is in use, but that doesn' work if we specifically ask for the
+  # module to build as yetus does if something changes in the module.  Rather than try to
+  # figure out what jdk is in use so we can duplicate the module activation logic, just
+  # build at the top level if anything changes in one of these modules and let maven sort it out.
+  branch1jdk8=(hbase-error-prone hbase-tinylfu-blockcache)
+  if [[ "${PATCH_BRANCH}" = branch-1* ]]; then
+    for jdk8module in "${branch1jdk8[@]}"; do
+      if [[ "${MODULES[*]}" =~ ${jdk8module} ]]; then
+        MODULES=(.)
+        break
+      fi
+    done
+  fi
+
+  if [[ ${testtype} == spotbugs ]]; then
+    # Run spotbugs on each module individually to diff pre-patch and post-patch results and
     # report new warnings for changed modules only.
-    # For some reason, findbugs on root is not working, but running on individual modules is
+    # For some reason, spotbugs on root is not working, but running on individual modules is
     # working. For time being, let it run on original list of CHANGED_MODULES. HBASE-19491
     for module in "${CHANGED_MODULES[@]}"; do
-      # skip findbugs on hbase-shell and hbase-it. hbase-it has nothing
-      # in src/main/java where findbugs goes to look
-      if [[ ${module} == hbase-shell ]]; then
-        continue
-      elif [[ ${module} == hbase-it ]]; then
+      # skip spotbugs on any module that lacks content in `src/main/java`
+      if [[ "$(find "${BASEDIR}/${module}" -iname '*.java' -and -ipath '*/src/main/java/*' \
+          -type f | wc -l | tr -d '[:space:]')" -eq 0 ]]; then
+        yetus_debug "no java files found under ${module}/src/main/java. skipping."
         continue
       else
         # shellcheck disable=SC2086
@@ -173,7 +206,8 @@ function personality_modules
     return
   fi
 
-  if [[ ${testtype} == compile ]] && [[ "${SKIP_ERRORPRONE}" != "true" ]]; then
+  if [[ ${testtype} == compile ]] && [[ "${SKIP_ERRORPRONE}" != "true" ]] &&
+      [[ "${PATCH_BRANCH}" != branch-1* ]] ; then
     extra="${extra} -PerrorProne"
   fi
 
@@ -343,7 +377,7 @@ function refguide_rebuild
     $(maven_executor) clean site --batch-mode \
       -pl . \
       -Dtest=NoUnitTests -DHBasePatchProcess -Prelease \
-      -Dmaven.javadoc.skip=true -Dcheckstyle.skip=true -Dfindbugs.skip=true
+      -Dmaven.javadoc.skip=true -Dcheckstyle.skip=true -Dspotbugs.skip=true
 
   count=$(${GREP} -c '\[ERROR\]' "${logfile}")
   if [[ ${count} -gt 0 ]]; then
@@ -420,13 +454,17 @@ function shadedjars_rebuild
 
   start_clock
 
+  local -a maven_args=('clean' 'verify' '-fae' '--batch-mode'
+    '-pl' 'hbase-shaded/hbase-shaded-check-invariants' '-am'
+    '-Dtest=NoUnitTests' '-DHBasePatchProcess' '-Prelease'
+    '-Dmaven.javadoc.skip=true' '-Dcheckstyle.skip=true' '-Dspotbugs.skip=true')
+  if [[ -n "${HADOOP_PROFILE}" ]]; then
+    maven_args+=("-Phadoop-${HADOOP_PROFILE}")
+  fi
+
   # disabled because "maven_executor" needs to return both command and args
   # shellcheck disable=2046
-  echo_and_redirect "${logfile}" \
-    $(maven_executor) clean verify -fae --batch-mode \
-      -pl hbase-shaded/hbase-shaded-check-invariants -am \
-      -Dtest=NoUnitTests -DHBasePatchProcess -Prelease \
-      -Dmaven.javadoc.skip=true -Dcheckstyle.skip=true -Dfindbugs.skip=true
+  echo_and_redirect "${logfile}" $(maven_executor) "${maven_args[@]}"
 
   count=$(${GREP} -c '\[ERROR\]' "${logfile}")
   if [[ ${count} -gt 0 ]]; then
@@ -509,8 +547,8 @@ function hadoopcheck_rebuild
 
   # All supported Hadoop versions that we want to test the compilation with
   # See the Hadoop section on prereqs in the HBase Reference Guide
-  if [[ "${PATCH_BRANCH}" = branch-1.* ]] && [[ "${PATCH_BRANCH#branch-1.}" -lt "4" ]]; then
-    yetus_info "Setting Hadoop 2 versions to test based on before-branch-1.4 rules."
+  if [[ "${PATCH_BRANCH}" = branch-1.3 ]]; then
+    yetus_info "Setting Hadoop 2 versions to test based on branch-1.3 rules."
     if [[ "${QUICK_HADOOPCHECK}" == "true" ]]; then
       hbase_hadoop2_versions="2.4.1 2.5.2 2.6.5 2.7.7"
     else
@@ -522,6 +560,13 @@ function hadoopcheck_rebuild
       hbase_hadoop2_versions="2.7.7"
     else
       hbase_hadoop2_versions="2.7.1 2.7.2 2.7.3 2.7.4 2.7.5 2.7.6 2.7.7"
+    fi
+  elif [[ "${PATCH_BRANCH}" = branch-1 ]]; then
+    yetus_info "Setting Hadoop 2 versions to test based on branch-1 rules."
+    if [[ "${QUICK_HADOOPCHECK}" == "true" ]]; then
+      hbase_hadoop2_versions="2.8.5 2.9.2"
+    else
+      hbase_hadoop2_versions="2.8.5 2.9.2"
     fi
   elif [[ "${PATCH_BRANCH}" = branch-2.0 ]]; then
     yetus_info "Setting Hadoop 2 versions to test based on branch-2.0 rules."
@@ -537,13 +582,23 @@ function hadoopcheck_rebuild
     else
       hbase_hadoop2_versions="2.7.1 2.7.2 2.7.3 2.7.4 2.7.5 2.7.6 2.7.7 2.8.2 2.8.3 2.8.4 2.8.5"
     fi
-  else
-    yetus_info "Setting Hadoop 2 versions to test based on branch-1.5+/branch-2.2+/master/feature branch rules."
+  elif [[ "${PATCH_BRANCH}" = branch-2.2 ]]; then
+    yetus_info "Setting Hadoop 2 versions to test based on branch-2.2 rules."
     if [[ "${QUICK_HADOOPCHECK}" == "true" ]]; then
-      hbase_hadoop2_versions="2.8.5 2.9.2"
+      hbase_hadoop2_versions="2.8.5 2.9.2 2.10.0"
     else
-      hbase_hadoop2_versions="2.8.5 2.9.2"
+      hbase_hadoop2_versions="2.8.5 2.9.2 2.10.0"
     fi
+  elif [[ "${PATCH_BRANCH}" = branch-2.* ]]; then
+    yetus_info "Setting Hadoop 2 versions to test based on branch-2.3+ rules."
+    if [[ "${QUICK_HADOOPCHECK}" == "true" ]]; then
+      hbase_hadoop2_versions="2.10.0"
+    else
+      hbase_hadoop2_versions="2.10.0"
+    fi
+  else
+    yetus_info "Setting Hadoop 2 versions to null on master/feature branch rules since we do not support hadoop 2 for hbase 3.x any more."
+    hbase_hadoop2_versions=""
   fi
   if [[ "${PATCH_BRANCH}" = branch-1* ]]; then
     yetus_info "Setting Hadoop 3 versions to test based on branch-1.x rules."
@@ -589,7 +644,7 @@ function hadoopcheck_rebuild
       $(maven_executor) clean install \
         -DskipTests -DHBasePatchProcess \
         -Dhadoop-three.version="${hadoopver}" \
-        -Dhadoop.profile=3.0
+        -Phadoop-3.0
     count=$(${GREP} -c '\[ERROR\]' "${logfile}")
     if [[ ${count} -gt 0 ]]; then
       add_vote_table -1 hadoopcheck "${BUILDMODEMSG} causes ${count} errors with Hadoop v${hadoopver}."
@@ -603,7 +658,11 @@ function hadoopcheck_rebuild
   fi
 
   if [[ -n "${hbase_hadoop3_versions}" ]]; then
-    add_vote_table +1 hadoopcheck "Patch does not cause any errors with Hadoop ${hbase_hadoop2_versions} or ${hbase_hadoop3_versions}."
+    if [[ -n "${hbase_hadoop2_versions}" ]]; then
+      add_vote_table +1 hadoopcheck "Patch does not cause any errors with Hadoop ${hbase_hadoop2_versions} or ${hbase_hadoop3_versions}."
+    else
+      add_vote_table +1 hadoopcheck "Patch does not cause any errors with Hadoop ${hbase_hadoop3_versions}."
+    fi
   else
     add_vote_table +1 hadoopcheck "Patch does not cause any errors with Hadoop ${hbase_hadoop2_versions}."
   fi

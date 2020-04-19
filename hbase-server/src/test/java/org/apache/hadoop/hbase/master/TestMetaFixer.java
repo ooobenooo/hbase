@@ -17,12 +17,13 @@
  */
 package org.apache.hadoop.hbase.master;
 
+import static org.apache.hbase.thirdparty.org.apache.commons.collections4.CollectionUtils.isNotEmpty;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
-
 import java.io.IOException;
 import java.util.Collections;
 import java.util.List;
-
+import java.util.function.BooleanSupplier;
 import org.apache.hadoop.hbase.HBaseClassTestRule;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HConstants;
@@ -33,9 +34,7 @@ import org.apache.hadoop.hbase.client.RegionInfoBuilder;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
 import org.apache.hadoop.hbase.util.Threads;
-
 import org.junit.AfterClass;
-import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.ClassRule;
 import org.junit.Rule;
@@ -70,11 +69,12 @@ public class TestMetaFixer {
   }
 
   @Test
-  public void testPlugsHoles() throws IOException {
+  public void testPlugsHoles() throws Exception {
     TableName tn = TableName.valueOf(this.name.getMethodName());
     TEST_UTIL.createMultiRegionTable(tn, HConstants.CATALOG_FAMILY);
     List<RegionInfo> ris = MetaTableAccessor.getTableRegions(TEST_UTIL.getConnection(), tn);
     MasterServices services = TEST_UTIL.getHBaseCluster().getMaster();
+    int initialSize = services.getAssignmentManager().getRegionStates().getRegionStates().size();
     services.getCatalogJanitor().scan();
     CatalogJanitor.Report report = services.getCatalogJanitor().getLastReport();
     assertTrue(report.isEmpty());
@@ -83,19 +83,25 @@ public class TestMetaFixer {
     deleteRegion(services, ris.get(ris.size() -1));
     deleteRegion(services, ris.get(3));
     deleteRegion(services, ris.get(0));
+    assertEquals(initialSize - 3,
+        services.getAssignmentManager().getRegionStates().getRegionStates().size());
     services.getCatalogJanitor().scan();
     report = services.getCatalogJanitor().getLastReport();
-    Assert.assertEquals(report.toString(), 3, report.getHoles().size());
+    assertEquals(report.toString(), 3, report.getHoles().size());
     MetaFixer fixer = new MetaFixer(services);
     fixer.fixHoles(report);
     services.getCatalogJanitor().scan();
     report = services.getCatalogJanitor().getLastReport();
     assertTrue(report.toString(), report.isEmpty());
-    // Disable and reenable so the added regions get reassigned.
-    TEST_UTIL.getAdmin().disableTable(tn);
-    TEST_UTIL.getAdmin().enableTable(tn);
+    assertEquals(initialSize,
+        services.getAssignmentManager().getRegionStates().getRegionStates().size());
+
+    // wait for RITs to settle -- those are the fixed regions being assigned -- or until the
+    // watchdog TestRule terminates the test.
+    await(50, () -> isNotEmpty(services.getAssignmentManager().getRegionsInTransition()));
+
     ris = MetaTableAccessor.getTableRegions(TEST_UTIL.getConnection(), tn);
-    Assert.assertEquals(originalCount, ris.size());
+    assertEquals(originalCount, ris.size());
   }
 
   /**
@@ -121,7 +127,7 @@ public class TestMetaFixer {
     report = services.getCatalogJanitor().getLastReport();
     assertTrue(report.isEmpty());
     ris = MetaTableAccessor.getTableRegions(TEST_UTIL.getConnection(), tn);
-    Assert.assertEquals(0, ris.size());
+    assertEquals(0, ris.size());
   }
 
   private static void makeOverlap(MasterServices services, RegionInfo a, RegionInfo b)
@@ -138,7 +144,7 @@ public class TestMetaFixer {
   }
 
   @Test
-  public void testOverlap() throws IOException {
+  public void testOverlap() throws Exception {
     TableName tn = TableName.valueOf(this.name.getMethodName());
     TEST_UTIL.createMultiRegionTable(tn, HConstants.CATALOG_FAMILY);
     List<RegionInfo> ris = MetaTableAccessor.getTableRegions(TEST_UTIL.getConnection(), tn);
@@ -154,18 +160,36 @@ public class TestMetaFixer {
     Threads.sleep(10000);
     services.getCatalogJanitor().scan();
     report = services.getCatalogJanitor().getLastReport();
-    Assert.assertEquals(6, report.getOverlaps().size());
-    Assert.assertEquals(1, MetaFixer.calculateMerges(10, report.getOverlaps()).size());
+    assertEquals(6, report.getOverlaps().size());
+    assertEquals(1, MetaFixer.calculateMerges(10, report.getOverlaps()).size());
     MetaFixer fixer = new MetaFixer(services);
     fixer.fixOverlaps(report);
-    while (true) {
-      services.getCatalogJanitor().scan();
-      report = services.getCatalogJanitor().getLastReport();
-      if (report.isEmpty()) {
-        break;
+    await(10, () -> {
+      try {
+        services.getCatalogJanitor().scan();
+        final CatalogJanitor.Report postReport = services.getCatalogJanitor().getLastReport();
+        return postReport.isEmpty();
+      } catch (Exception e) {
+        throw new RuntimeException(e);
       }
-      Threads.sleep(10);
+    });
+  }
+
+  /**
+   * Await the successful return of {@code condition}, sleeping {@code sleepMillis} between
+   * invocations.
+   */
+  private static void await(final long sleepMillis, final BooleanSupplier condition)
+    throws InterruptedException {
+    try {
+      while (!condition.getAsBoolean()) {
+        Thread.sleep(sleepMillis);
+      }
+    } catch (RuntimeException e) {
+      if (e.getCause() instanceof AssertionError) {
+        throw (AssertionError) e.getCause();
+      }
+      throw e;
     }
-    assertTrue(report.toString(), report.isEmpty());
   }
 }

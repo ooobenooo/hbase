@@ -136,6 +136,21 @@ if [ -f "$HBASE_HOME/conf/hbase-env-$COMMAND.sh" ]; then
   . "$HBASE_HOME/conf/hbase-env-$COMMAND.sh"
 fi
 
+# establish a default value for HBASE_OPTS if it's not already set. For now,
+# all we set is the garbage collector.
+if [ -z "${HBASE_OPTS}" ] ; then
+  major_version_number="$(parse_java_major_version "$(read_java_version)")"
+  case "$major_version_number" in
+  8|9|10)
+    HBASE_OPTS="-XX:+UseConcMarkSweepGC"
+    ;;
+  11|*)
+    HBASE_OPTS="-XX:+UseG1GC"
+    ;;
+  esac
+  export HBASE_OPTS
+fi
+
 add_size_suffix() {
     # add an 'm' suffix if the argument is missing one, otherwise use whats there
     local val="$1"
@@ -184,19 +199,10 @@ if [ -d "$HBASE_HOME/hbase-server/target/hbase-webapps" ]; then
     add_to_cp_if_exists "${HBASE_HOME}/hbase-rest/target"
   else
     add_to_cp_if_exists "${HBASE_HOME}/hbase-server/target"
+    # Needed for GetJavaProperty check below
+    add_to_cp_if_exists "${HBASE_HOME}/hbase-server/target/classes"
   fi
 fi
-
-#add the hbase jars for each module
-for f in $HBASE_HOME/hbase-jars/hbase*.jar; do
-	if [[ $f = *sources.jar ]]
-  then
-    : # Skip sources.jar
-  elif [ -f $f ]
-  then
-    CLASSPATH=${CLASSPATH}:$f;
-  fi
-done
 
 #If avail, add Hadoop to the CLASSPATH and to the JAVA_LIBRARY_PATH
 # Allow this functionality to be disabled
@@ -318,7 +324,15 @@ fi
 
 #If configured and available, add Hadoop to the CLASSPATH and to the JAVA_LIBRARY_PATH
 if [ -n "${HADOOP_IN_PATH}" ] && [ -f "${HADOOP_IN_PATH}" ]; then
-  HADOOP_JAVA_LIBRARY_PATH=$(HADOOP_CLASSPATH="$CLASSPATH" "${HADOOP_IN_PATH}" \
+  # If built hbase, temporarily add hbase-server*.jar to classpath for GetJavaProperty
+  # Exclude hbase-server*-tests.jar
+  temporary_cp=
+  for f in "${HBASE_HOME}"/lib/hbase-server*.jar; do
+    if [[ ! "${f}" =~ ^.*\-tests\.jar$ ]]; then
+      temporary_cp=":$f"
+    fi
+  done
+  HADOOP_JAVA_LIBRARY_PATH=$(HADOOP_CLASSPATH="$CLASSPATH${temporary_cp}" "${HADOOP_IN_PATH}" \
                              org.apache.hadoop.hbase.util.GetJavaProperty java.library.path)
   if [ -n "$HADOOP_JAVA_LIBRARY_PATH" ]; then
     JAVA_LIBRARY_PATH=$(append_path "${JAVA_LIBRARY_PATH}" "$HADOOP_JAVA_LIBRARY_PATH")
@@ -643,7 +657,7 @@ elif [ "$COMMAND" = "ltt" ] ; then
   CLASS='org.apache.hadoop.hbase.util.LoadTestTool'
   HBASE_OPTS="$HBASE_OPTS $HBASE_LTT_OPTS"
 elif [ "$COMMAND" = "canary" ] ; then
-  CLASS='org.apache.hadoop.hbase.tool.Canary'
+  CLASS='org.apache.hadoop.hbase.tool.CanaryTool'
   HBASE_OPTS="$HBASE_OPTS $HBASE_CANARY_OPTS"
 elif [ "$COMMAND" = "version" ] ; then
   CLASS='org.apache.hadoop.hbase.util.VersionInfo'
@@ -674,7 +688,10 @@ elif [ "$COMMAND" = "hbtop" ] ; then
     done
   fi
 
-  HBASE_OPTS="${HBASE_OPTS} -Dlog4j.configuration=file:${HBASE_HOME}/conf/log4j-hbtop.properties"
+  if [ -f "${HBASE_HOME}/conf/log4j-hbtop.properties" ] ; then
+    HBASE_HBTOP_OPTS="${HBASE_HBTOP_OPTS} -Dlog4j.configuration=file:${HBASE_HOME}/conf/log4j-hbtop.properties"
+  fi
+  HBASE_OPTS="${HBASE_OPTS} ${HBASE_HBTOP_OPTS}"
 else
   CLASS=$COMMAND
 fi
@@ -704,18 +721,15 @@ if [ "${HBASE_JDK11}" != "" ]; then
   fi
 else
   # Use JDK detection
-  JAVA=$JAVA_HOME/bin/java
-
-  version=$($JAVA -version 2>&1 | awk -F '"' '/version/ {print $2}')
-  # '-' check is for cases such as "13-ea"
-  version_number=$(echo "$version" | cut -d'.' -f1 | cut -d'-' -f1)
+  version="$(read_java_version)"
+  major_version_number="$(parse_java_major_version "$version")"
 
   if [ "${DEBUG}" = "true" ]; then
     echo "HBASE_JDK11 not set hence using JDK detection."
-    echo "Extracted JDK version - ${version}, version_number - ${version_number}"
+    echo "Extracted JDK version - ${version}, major_version_number - ${major_version_number}"
   fi
 
-  if [[ "$version_number" -ge "11" ]]; then
+  if [[ "$major_version_number" -ge "11" ]]; then
     if [ "${DEBUG}" = "true" ]; then
       echo "Version ${version} is greater-than/equal to 11 hence adding JDK11 jars to classpath."
     fi

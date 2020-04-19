@@ -182,7 +182,7 @@ public class VerifyReplication extends Configured implements Tool {
         int versions = conf.getInt(NAME+".versions", -1);
         LOG.info("Setting number of version inside map as: " + versions);
         if (versions >= 0) {
-          scan.setMaxVersions(versions);
+          scan.readVersions(versions);
         }
         TableName tableName = TableName.valueOf(conf.get(NAME + ".tableName"));
         sourceConnection = ConnectionFactory.createConnection(conf);
@@ -198,7 +198,7 @@ public class VerifyReplication extends Configured implements Tool {
         TableName peerTableName = TableName.valueOf(peerName);
         replicatedConnection = ConnectionFactory.createConnection(peerConf);
         replicatedTable = replicatedConnection.getTable(peerTableName);
-        scan.setStartRow(value.getRow());
+        scan.withStartRow(value.getRow());
 
         byte[] endRow = null;
         if (tableSplit instanceof TableSnapshotInputFormat.TableSnapshotRegionSplit) {
@@ -459,7 +459,7 @@ public class VerifyReplication extends Configured implements Tool {
       scan.setBatch(batch);
     }
     if (versions >= 0) {
-      scan.setMaxVersions(versions);
+      scan.readVersions(versions);
       LOG.info("Number of versions set to " + versions);
     }
     if(families != null) {
@@ -511,7 +511,7 @@ public class VerifyReplication extends Configured implements Tool {
   }
 
   private static void setStartAndStopRows(Scan scan, byte[] startPrefixRow, byte[] lastPrefixRow) {
-    scan.setStartRow(startPrefixRow);
+    scan.withStartRow(startPrefixRow);
     byte[] stopRow = Bytes.add(Bytes.head(lastPrefixRow, lastPrefixRow.length - 1),
         new byte[]{(byte) (lastPrefixRow[lastPrefixRow.length - 1] + 1)});
     scan.setStopRow(stopRow);

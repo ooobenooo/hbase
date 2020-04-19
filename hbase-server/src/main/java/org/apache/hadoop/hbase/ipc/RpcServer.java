@@ -33,6 +33,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.LongAdder;
+
+import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.CallQueueTooBigException;
 import org.apache.hadoop.hbase.CellScanner;
@@ -44,6 +46,9 @@ import org.apache.hadoop.hbase.io.ByteBuffAllocator;
 import org.apache.hadoop.hbase.monitoring.MonitoredRPCHandler;
 import org.apache.hadoop.hbase.monitoring.TaskMonitor;
 import org.apache.hadoop.hbase.regionserver.RSRpcServices;
+import org.apache.hadoop.hbase.regionserver.slowlog.RpcLogDetails;
+import org.apache.hadoop.hbase.regionserver.slowlog.SlowLogRecorder;
+import org.apache.hadoop.hbase.security.HBasePolicyProvider;
 import org.apache.hadoop.hbase.security.SaslUtil;
 import org.apache.hadoop.hbase.security.SaslUtil.QualityOfProtection;
 import org.apache.hadoop.hbase.security.User;
@@ -54,6 +59,7 @@ import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.authorize.AuthorizationException;
 import org.apache.hadoop.security.authorize.PolicyProvider;
+import org.apache.hadoop.security.authorize.ProxyUsers;
 import org.apache.hadoop.security.authorize.ServiceAuthorizationManager;
 import org.apache.hadoop.security.token.SecretManager;
 import org.apache.hadoop.security.token.TokenIdentifier;
@@ -85,6 +91,12 @@ public abstract class RpcServer implements RpcServerInterface,
   protected static final CallQueueTooBigException CALL_QUEUE_TOO_BIG_EXCEPTION
       = new CallQueueTooBigException();
 
+  private static final String MULTI_GETS = "multi.gets";
+  private static final String MULTI_MUTATIONS = "multi.mutations";
+  private static final String MULTI_SERVICE_CALLS = "multi.service_calls";
+  private static final String GET_SLOW_LOG_RESPONSES = "GetSlowLogResponses";
+  private static final String CLEAR_SLOW_LOGS_RESPONSES = "ClearSlowLogsResponses";
+
   private final boolean authorize;
   protected boolean isSecurityEnabled;
 
@@ -110,8 +122,6 @@ public abstract class RpcServer implements RpcServerInterface,
   protected SecretManager<TokenIdentifier> secretManager;
   protected final Map<String, String> saslProps;
 
-  @edu.umd.cs.findbugs.annotations.SuppressWarnings(value="IS2_INCONSISTENT_SYNC",
-      justification="Start is synchronized so authManager creation is single-threaded")
   protected ServiceAuthorizationManager authManager;
 
   /** This is set to Call object before Handler invokes an RPC and ybdie
@@ -215,6 +225,12 @@ public abstract class RpcServer implements RpcServerInterface,
    */
   private RSRpcServices rsRpcServices;
 
+
+  /**
+   * Use to add online slowlog responses
+   */
+  private SlowLogRecorder slowLogRecorder;
+
   @FunctionalInterface
   protected interface CallCleanup {
     void run();
@@ -297,6 +313,9 @@ public abstract class RpcServer implements RpcServerInterface,
     if (scheduler instanceof ConfigurationObserver) {
       ((ConfigurationObserver) scheduler).onConfigurationChange(newConf);
     }
+    if (authorize) {
+      refreshAuthManager(newConf, new HBasePolicyProvider());
+    }
   }
 
   protected void initReconfigurable(Configuration confToLoad) {
@@ -323,12 +342,14 @@ public abstract class RpcServer implements RpcServerInterface,
   }
 
   @Override
-  public void refreshAuthManager(PolicyProvider pp) {
+  public synchronized void refreshAuthManager(Configuration conf, PolicyProvider pp) {
     // Ignore warnings that this should be accessed in a static way instead of via an instance;
     // it'll break if you go via static route.
-    synchronized (authManager) {
-      authManager.refresh(this.conf, pp);
-    }
+    System.setProperty("hadoop.policy.file", "hbase-policy.xml");
+    this.authManager.refresh(conf, pp);
+    LOG.info("Refreshed hbase-policy.xml successfully");
+    ProxyUsers.refreshSuperUserGroupsConfiguration(conf);
+    LOG.info("Refreshed super and proxy users successfully");
   }
 
   protected AuthenticationTokenSecretManager createSecretManager() {
@@ -403,13 +424,22 @@ public abstract class RpcServer implements RpcServerInterface,
       boolean tooSlow = (processingTime > warnResponseTime && warnResponseTime > -1);
       boolean tooLarge = (responseSize > warnResponseSize && warnResponseSize > -1);
       if (tooSlow || tooLarge) {
+        final String userName = call.getRequestUserName().orElse(StringUtils.EMPTY);
         // when tagging, we let TooLarge trump TooSmall to keep output simple
         // note that large responses will often also be slow.
         logResponse(param,
-            md.getName(), md.getName() + "(" + param.getClass().getName() + ")",
-            (tooLarge ? "TooLarge" : "TooSlow"),
-            status.getClient(), startTime, processingTime, qTime,
-            responseSize);
+          md.getName(), md.getName() + "(" + param.getClass().getName() + ")",
+          tooLarge, tooSlow,
+          status.getClient(), startTime, processingTime, qTime,
+          responseSize, userName);
+        if (this.slowLogRecorder != null) {
+          // send logs to ring buffer owned by slowLogRecorder
+          final String className = server == null ? StringUtils.EMPTY :
+            server.getClass().getSimpleName();
+          this.slowLogRecorder.addSlowLogPayload(
+            new RpcLogDetails(call, status.getClient(), responseSize, className, tooSlow,
+              tooLarge));
+        }
       }
       return new Pair<>(result, controller.cellScanner());
     } catch (Throwable e) {
@@ -440,17 +470,21 @@ public abstract class RpcServer implements RpcServerInterface,
    * @param param The parameters received in the call.
    * @param methodName The name of the method invoked
    * @param call The string representation of the call
-   * @param tag  The tag that will be used to indicate this event in the log.
-   * @param clientAddress   The address of the client who made this call.
-   * @param startTime       The time that the call was initiated, in ms.
-   * @param processingTime  The duration that the call took to run, in ms.
-   * @param qTime           The duration that the call spent on the queue
-   *                        prior to being initiated, in ms.
-   * @param responseSize    The size in bytes of the response buffer.
+   * @param tooLarge To indicate if the event is tooLarge
+   * @param tooSlow To indicate if the event is tooSlow
+   * @param clientAddress The address of the client who made this call.
+   * @param startTime The time that the call was initiated, in ms.
+   * @param processingTime The duration that the call took to run, in ms.
+   * @param qTime The duration that the call spent on the queue
+   *   prior to being initiated, in ms.
+   * @param responseSize The size in bytes of the response buffer.
+   * @param userName UserName of the current RPC Call
    */
-  void logResponse(Message param, String methodName, String call, String tag,
-      String clientAddress, long startTime, int processingTime, int qTime,
-      long responseSize) throws IOException {
+  void logResponse(Message param, String methodName, String call, boolean tooLarge,
+      boolean tooSlow, String clientAddress, long startTime, int processingTime, int qTime,
+      long responseSize, String userName) {
+    final String className = server == null ? StringUtils.EMPTY :
+      server.getClass().getSimpleName();
     // base information that is reported regardless of type of call
     Map<String, Object> responseInfo = new HashMap<>();
     responseInfo.put("starttimems", startTime);
@@ -458,7 +492,7 @@ public abstract class RpcServer implements RpcServerInterface,
     responseInfo.put("queuetimems", qTime);
     responseInfo.put("responsesize", responseSize);
     responseInfo.put("client", clientAddress);
-    responseInfo.put("class", server == null? "": server.getClass().getSimpleName());
+    responseInfo.put("class", className);
     responseInfo.put("method", methodName);
     responseInfo.put("call", call);
     // The params could be really big, make sure they don't kill us at WARN
@@ -496,12 +530,15 @@ public abstract class RpcServer implements RpcServerInterface,
           }
         }
       }
-      responseInfo.put("multi.gets", numGets);
-      responseInfo.put("multi.mutations", numMutations);
-      responseInfo.put("multi.servicecalls", numServiceCalls);
+      responseInfo.put(MULTI_GETS, numGets);
+      responseInfo.put(MULTI_MUTATIONS, numMutations);
+      responseInfo.put(MULTI_SERVICE_CALLS, numServiceCalls);
     }
+    final String tag = (tooLarge && tooSlow) ? "TooLarge & TooSlow"
+      : (tooSlow ? "TooSlow" : "TooLarge");
     LOG.warn("(response" + tag + "): " + GSON.toJson(responseInfo));
   }
+
 
   /**
    * Truncate to number of chars decided by conf hbase.ipc.trace.log.max.length
@@ -555,13 +592,11 @@ public abstract class RpcServer implements RpcServerInterface,
    * @param addr InetAddress of incoming connection
    * @throws AuthorizationException when the client isn't authorized to talk the protocol
    */
-  public void authorize(UserGroupInformation user, ConnectionHeader connection,
+  public synchronized void authorize(UserGroupInformation user, ConnectionHeader connection,
       InetAddress addr) throws AuthorizationException {
     if (authorize) {
       Class<?> c = getServiceInterface(services, connection.getServiceName());
-      synchronized (authManager) {
-        authManager.authorize(user, c, getConf(), addr);
-      }
+      authManager.authorize(user, c, getConf(), addr);
     }
   }
 
@@ -646,6 +681,27 @@ public abstract class RpcServer implements RpcServerInterface,
 
   public static boolean isInRpcCallContext() {
     return CurCall.get() != null;
+  }
+
+  /**
+   * Used by {@link org.apache.hadoop.hbase.procedure2.store.region.RegionProcedureStore}. For
+   * master's rpc call, it may generate new procedure and mutate the region which store procedure.
+   * There are some check about rpc when mutate region, such as rpc timeout check. So unset the rpc
+   * call to avoid the rpc check.
+   * @return the currently ongoing rpc call
+   */
+  public static Optional<RpcCall> unsetCurrentCall() {
+    Optional<RpcCall> rpcCall = getCurrentCall();
+    CurCall.set(null);
+    return rpcCall;
+  }
+
+  /**
+   * Used by {@link org.apache.hadoop.hbase.procedure2.store.region.RegionProcedureStore}. Set the
+   * rpc call back after mutate region.
+   */
+  public static void setCurrentCall(RpcCall rpcCall) {
+    CurCall.set(rpcCall);
   }
 
   /**
@@ -757,5 +813,15 @@ public abstract class RpcServer implements RpcServerInterface,
   @Override
   public void setRsRpcServices(RSRpcServices rsRpcServices) {
     this.rsRpcServices = rsRpcServices;
+  }
+
+  @Override
+  public void setSlowLogRecorder(SlowLogRecorder slowLogRecorder) {
+    this.slowLogRecorder = slowLogRecorder;
+  }
+
+  @Override
+  public SlowLogRecorder getSlowLogRecorder() {
+    return slowLogRecorder;
   }
 }

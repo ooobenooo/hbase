@@ -1325,6 +1325,58 @@ public interface MasterObserver {
       throws IOException {}
 
   /**
+   * Called before listing all tables in the region server group.
+   * @param ctx the environment to interact with the framework and master
+   * @param groupName name of the region server group
+   */
+  default void preListTablesInRSGroup(final ObserverContext<MasterCoprocessorEnvironment> ctx,
+    final String groupName) throws IOException {}
+
+  /**
+   * Called after listing all tables in the region server group.
+   * @param ctx the environment to interact with the framework and master
+   * @param groupName name of the region server group
+   */
+  default void postListTablesInRSGroup(final ObserverContext<MasterCoprocessorEnvironment> ctx,
+    final String groupName) throws IOException {}
+
+  /**
+   * Called before rename rsgroup.
+   * @param ctx the environment to interact with the framework and master
+   * @param oldName old rsgroup name
+   * @param newName new rsgroup name
+   */
+  default void preRenameRSGroup(final ObserverContext<MasterCoprocessorEnvironment> ctx,
+    final String oldName, final String newName) throws IOException {}
+
+  /**
+   * Called after rename rsgroup.
+   * @param ctx the environment to interact with the framework and master
+   * @param oldName old rsgroup name
+   * @param newName new rsgroup name
+   */
+  default void postRenameRSGroup(final ObserverContext<MasterCoprocessorEnvironment> ctx,
+    final String oldName, final String newName) throws IOException {}
+
+  /**
+   * Called before getting the configured namespaces and tables in the region server group.
+   * @param ctx the environment to interact with the framework and master
+   * @param groupName name of the region server group
+   */
+  default void preGetConfiguredNamespacesAndTablesInRSGroup(
+    final ObserverContext<MasterCoprocessorEnvironment> ctx, final String groupName)
+    throws IOException {}
+
+  /**
+   * Called after getting the configured namespaces and tables in the region server group.
+   * @param ctx the environment to interact with the framework and master
+   * @param groupName name of the region server group
+   */
+  default void postGetConfiguredNamespacesAndTablesInRSGroup(
+    final ObserverContext<MasterCoprocessorEnvironment> ctx, final String groupName)
+    throws IOException {}
+
+  /**
    * Called before getting region server group info of the passed server.
    * @param ctx the environment to interact with the framework and master
    * @param server server to get RSGroupInfo for

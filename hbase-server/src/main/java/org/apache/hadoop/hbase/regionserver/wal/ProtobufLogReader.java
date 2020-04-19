@@ -418,7 +418,7 @@ public class ProtobufLogReader extends ReaderBase {
               "current position and original position match at {}", originalPosition);
             seekOnFs(0);
           } else {
-            LOG.info("Reached the end of file at position {}", originalPosition);
+            LOG.debug("Reached the end of file at position {}", originalPosition);
           }
         } else {
           // Else restore our position to original location in hope that next time through we will
@@ -445,7 +445,7 @@ public class ProtobufLogReader extends ReaderBase {
         && ex.getCause() != null && ex.getCause() instanceof IOException) {
       ioEx = (IOException)ex.getCause();
     }
-    if (ioEx != null) {
+    if ((ioEx != null) && (ioEx.getMessage() != null)) {
       if (ioEx.getMessage().contains("EOF")) return ioEx;
       return null;
     }

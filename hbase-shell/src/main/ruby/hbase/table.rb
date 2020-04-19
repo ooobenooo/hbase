@@ -520,9 +520,9 @@ EOF
         end
 
         scan = if stoprow
-                 org.apache.hadoop.hbase.client.Scan.new(startrow.to_java_bytes, stoprow.to_java_bytes)
+                 org.apache.hadoop.hbase.client.Scan.new.with_start_row(startrow.to_java_bytes).with_stop_row(stoprow.to_java_bytes)
                else
-                 org.apache.hadoop.hbase.client.Scan.new(startrow.to_java_bytes)
+                 org.apache.hadoop.hbase.client.Scan.new.with_start_row(startrow.to_java_bytes)
                end
 
         # This will overwrite any startrow/stoprow settings
@@ -734,14 +734,20 @@ EOF
       [split[0], split.length > 1 ? split[1] : nil]
     end
 
+    def toISO8601(millis)
+      return java.time.Instant.ofEpochMilli(millis).toString
+    end
+
     # Make a String of the passed kv
     # Intercept cells whose format we know such as the info:regioninfo in hbase:meta
     def to_string(column, kv, maxlength = -1, converter_class = nil, converter = nil)
       if is_meta_table?
-        if column == 'info:regioninfo' || column == 'info:splitA' || column == 'info:splitB'
+        if column == 'info:regioninfo' || column == 'info:splitA' || column == 'info:splitB' || \
+            column.start_with?('info:merge')
           hri = org.apache.hadoop.hbase.HRegionInfo.parseFromOrNull(kv.getValueArray,
-                                                                    kv.getValueOffset, kv.getValueLength)
-          return format('timestamp=%d, value=%s', kv.getTimestamp, hri.nil? ? '' : hri.toString)
+            kv.getValueOffset, kv.getValueLength)
+          return format('timestamp=%s, value=%s', toISO8601(kv.getTimestamp),
+            hri.nil? ? '' : hri.toString)
         end
         if column == 'info:serverstartcode'
           if kv.getValueLength > 0
@@ -751,14 +757,14 @@ EOF
             str_val = org.apache.hadoop.hbase.util.Bytes.toStringBinary(kv.getValueArray,
                                                                         kv.getValueOffset, kv.getValueLength)
           end
-          return format('timestamp=%d, value=%s', kv.getTimestamp, str_val)
+          return format('timestamp=%s, value=%s', toISO8601(kv.getTimestamp), str_val)
         end
       end
 
       if org.apache.hadoop.hbase.CellUtil.isDelete(kv)
-        val = "timestamp=#{kv.getTimestamp}, type=#{org.apache.hadoop.hbase.KeyValue::Type.codeToType(kv.getTypeByte)}"
+        val = "timestamp=#{toISO8601(kv.getTimestamp)}, type=#{org.apache.hadoop.hbase.KeyValue::Type.codeToType(kv.getTypeByte)}"
       else
-        val = "timestamp=#{kv.getTimestamp}, value=#{convert(column, kv, converter_class, converter)}"
+        val = "timestamp=#{toISO8601(kv.getTimestamp)}, value=#{convert(column, kv, converter_class, converter)}"
       end
       maxlength != -1 ? val[0, maxlength] : val
     end

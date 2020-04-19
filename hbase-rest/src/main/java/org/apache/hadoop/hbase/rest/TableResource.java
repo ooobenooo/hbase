@@ -140,7 +140,7 @@ public class TableResource extends ResourceBase {
         byte[] prefixBytes = Bytes.toBytes(prefix);
         prefixFilter = new PrefixFilter(Bytes.toBytes(prefix));
         if (startRow.isEmpty()) {
-          tableScan.setStartRow(prefixBytes);
+          tableScan.withStartRow(prefixBytes);
         }
       }
       if (LOG.isTraceEnabled()) {
@@ -151,10 +151,10 @@ public class TableResource extends ResourceBase {
       }
       Table hTable = RESTServlet.getInstance().getTable(this.table);
       tableScan.setBatch(batchSize);
-      tableScan.setMaxVersions(maxVersions);
+      tableScan.readVersions(maxVersions);
       tableScan.setTimeRange(startTime, endTime);
       if (!startRow.isEmpty()) {
-        tableScan.setStartRow(Bytes.toBytes(startRow));
+        tableScan.withStartRow(Bytes.toBytes(startRow));
       }
       tableScan.setStopRow(Bytes.toBytes(endRow));
       for (String col : column) {
